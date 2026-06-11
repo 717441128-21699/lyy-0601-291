@@ -39,6 +39,8 @@ class WeeklyReport:
                 'text_report': '',
                 'markdown_report': '',
                 'recovery_combo': {},
+                'training_structure': {},
+                'coach_summary': {},
                 'export_data': pd.DataFrame(),
                 'summary_export': pd.DataFrame(),
                 'monthly_trend': {},
@@ -61,16 +63,19 @@ class WeeklyReport:
         week_summary = self._calculate_week_summary(this_week_df, last_week_df)
         anomalies = self._detect_anomalies(df, this_week_df)
         recovery_combo = self._generate_recovery_combo(this_week_df, df, recovery_analysis, anomalies)
+        training_structure = self._analyze_training_structure(this_week_df)
         monthly_trend = self._analyze_monthly_trend(df, weeks=trend_weeks)
         charts = self._generate_charts(this_week_df, df, monthly_trend)
         text_report = self._generate_text_report(week_summary, anomalies)
         week_period = f'{week_start.strftime("%Y-%m-%d")} ~ {week_end.strftime("%Y-%m-%d")}'
+        coach_summary = self._generate_coach_summary(week_summary, recovery_combo, anomalies, training_structure, monthly_trend)
         markdown_report = self._generate_markdown_report(
             week_summary, anomalies, recovery_analysis, goal_analysis,
-            recovery_combo, monthly_trend, week_period
+            recovery_combo, monthly_trend, week_period, training_structure, coach_summary
         )
         export_data, summary_export = self._prepare_export_data(
-            df, this_week_df, week_summary, recovery_combo, anomalies, monthly_trend, week_period
+            df, this_week_df, week_summary, recovery_combo, anomalies, monthly_trend, week_period,
+            training_structure, coach_summary
         )
 
         return {
@@ -83,6 +88,8 @@ class WeeklyReport:
             'text_report': text_report,
             'markdown_report': markdown_report,
             'recovery_combo': recovery_combo,
+            'training_structure': training_structure,
+            'coach_summary': coach_summary,
             'monthly_trend': monthly_trend,
             'export_data': export_data,
             'summary_export': summary_export,
@@ -619,6 +626,7 @@ class WeeklyReport:
 
     def _chart_monthly_trend(self, monthly_trend: Dict) -> go.Figure:
         weekly_data = monthly_trend.get('weekly_data', [])
+        trend_weeks = monthly_trend.get('trend_weeks', len(weekly_data))
         if not weekly_data:
             fig = go.Figure()
             fig.update_layout(
@@ -724,7 +732,7 @@ class WeeklyReport:
                 )
 
         fig.update_layout(
-            title='近8周训练负荷、睡眠与恢复趋势',
+            title=f'近{trend_weeks}周训练负荷、睡眠与恢复趋势',
             height=700,
             template='plotly_white',
             legend=dict(orientation='h', yanchor='bottom', y=1.02)
@@ -734,6 +742,201 @@ class WeeklyReport:
         fig.update_yaxes(title_text='睡眠(h)', row=3, col=1, range=[0, 12])
 
         return fig
+
+    def _analyze_training_structure(self, this_week: pd.DataFrame) -> Dict:
+        if this_week.empty:
+            return {'has_data': False, 'by_sport': {}, 'overall': {}, 'structure_judgment': '', 'has_hr_data': False}
+
+        df = this_week.copy()
+        sports_present = df['sport_type'].unique()
+
+        def classify_intensity(row) -> str:
+            hr = row.get('avg_hr')
+            if pd.isna(hr) or hr <= 0:
+                return 'unknown'
+            if hr < 120:
+                return 'low'
+            elif hr < 150:
+                return 'moderate'
+            else:
+                return 'high'
+
+        df['intensity'] = df.apply(classify_intensity, axis=1)
+
+        by_sport = {}
+        total_min_all = 0
+        low_min_all = 0
+        moderate_min_all = 0
+        high_min_all = 0
+        unknown_min_all = 0
+        has_hr_data = df['avg_hr'].notna().any()
+
+        for sport in sports_present:
+            sport_df = df[df['sport_type'] == sport]
+            total_min = float(sport_df['duration_min'].sum()) if 'duration_min' in sport_df.columns else 0
+            low_min = float(sport_df[sport_df['intensity'] == 'low']['duration_min'].sum()) if 'duration_min' in sport_df.columns else 0
+            moderate_min = float(sport_df[sport_df['intensity'] == 'moderate']['duration_min'].sum()) if 'duration_min' in sport_df.columns else 0
+            high_min = float(sport_df[sport_df['intensity'] == 'high']['duration_min'].sum()) if 'duration_min' in sport_df.columns else 0
+            unknown_min = float(sport_df[sport_df['intensity'] == 'unknown']['duration_min'].sum()) if 'duration_min' in sport_df.columns else 0
+
+            total_min_all += total_min
+            low_min_all += low_min
+            moderate_min_all += moderate_min
+            high_min_all += high_min
+            unknown_min_all += unknown_min
+
+            low_pct = round(low_min / total_min * 100, 1) if total_min > 0 else 0
+            moderate_pct = round(moderate_min / total_min * 100, 1) if total_min > 0 else 0
+            high_pct = round(high_min / total_min * 100, 1) if total_min > 0 else 0
+            unknown_pct = round(unknown_min / total_min * 100, 1) if total_min > 0 else 0
+
+            by_sport[sport] = {
+                'name': self.sport_names.get(sport, sport),
+                'total_min': round(total_min, 1),
+                'total_h': round(total_min / 60, 2),
+                'low_min': round(low_min, 1),
+                'moderate_min': round(moderate_min, 1),
+                'high_min': round(high_min, 1),
+                'unknown_min': round(unknown_min, 1),
+                'low_pct': low_pct,
+                'moderate_pct': moderate_pct,
+                'high_pct': high_pct,
+                'unknown_pct': unknown_pct,
+                'activity_count': len(sport_df)
+            }
+
+        low_pct_all = round(low_min_all / total_min_all * 100, 1) if total_min_all > 0 else 0
+        moderate_pct_all = round(moderate_min_all / total_min_all * 100, 1) if total_min_all > 0 else 0
+        high_pct_all = round(high_min_all / total_min_all * 100, 1) if total_min_all > 0 else 0
+        unknown_pct_all = round(unknown_min_all / total_min_all * 100, 1) if total_min_all > 0 else 0
+
+        if total_min_all > 0 and has_hr_data:
+            if high_pct_all >= 25:
+                judgment = '偏强度周'
+                judgment_desc = '高强度训练占比较高，本周以强度训练为主，注意赛后恢复'
+            elif low_pct_all >= 70:
+                judgment = '偏恢复周'
+                judgment_desc = '低强度有氧占比较高，本周以恢复和基础耐力为主'
+            elif moderate_pct_all >= 40:
+                judgment = '偏堆量周'
+                judgment_desc = '阈值区间训练较多，本周以训练量积累为主，警惕"垃圾里程"'
+            else:
+                judgment = '结构均衡周'
+                judgment_desc = '低中高强度比例合理，训练结构均衡'
+        else:
+            if not has_hr_data:
+                judgment = '无心率数据'
+                judgment_desc = '缺少心率数据，无法准确判断训练强度分布'
+            else:
+                judgment = '数据不足'
+                judgment_desc = '训练数据不足，无法判断训练结构'
+
+        overall = {
+            'total_min': round(total_min_all, 1),
+            'total_h': round(total_min_all / 60, 2),
+            'low_min': round(low_min_all, 1),
+            'moderate_min': round(moderate_min_all, 1),
+            'high_min': round(high_min_all, 1),
+            'unknown_min': round(unknown_min_all, 1),
+            'low_pct': low_pct_all,
+            'moderate_pct': moderate_pct_all,
+            'high_pct': high_pct_all,
+            'unknown_pct': unknown_pct_all
+        }
+
+        return {
+            'has_data': True,
+            'has_hr_data': has_hr_data,
+            'by_sport': by_sport,
+            'overall': overall,
+            'structure_judgment': judgment,
+            'structure_judgment_desc': judgment_desc
+        }
+
+    def _generate_coach_summary(self, week_summary: Dict, recovery_combo: Dict,
+                                 anomalies: Dict, training_structure: Dict,
+                                 monthly_trend: Dict) -> Dict:
+        highlights = []
+        risks = []
+        next_week_suggestions = []
+        confirm_questions = []
+
+        this_week = week_summary.get('this_week', {})
+        total_activities = this_week.get('total_activities', 0)
+        total_load = this_week.get('total_training_load', 0)
+        total_distance = this_week.get('total_distance_km', 0)
+        total_duration_h = this_week.get('total_duration_h', 0)
+
+        highlights.append(f'本周完成 {total_activities} 次训练，总时长 {total_duration_h:.1f} 小时')
+        if total_distance > 0:
+            highlights.append(f'总训练距离 {total_distance:.1f}km，总训练负荷 {total_load:.0f}')
+
+        structure = training_structure.get('structure_judgment', '')
+        if structure and structure not in ['无心率数据', '数据不足']:
+            highlights.append(f'训练结构判断：{structure}')
+
+        recovery_score = recovery_combo.get('recovery_score', 0)
+        if recovery_score >= 80:
+            highlights.append(f'恢复状态良好（评分 {recovery_score}/100）')
+        elif recovery_score >= 60:
+            risks.append(f'恢复状态一般（评分 {recovery_score}/100），需要关注休息质量')
+        else:
+            risks.append(f'恢复状态较差（评分 {recovery_score}/100），建议适当减量')
+
+        issue_count = recovery_combo.get('issue_count', 0)
+        if issue_count > 0:
+            issues = recovery_combo.get('issues', [])
+            for issue in issues[:3]:
+                risks.append(issue)
+
+        anomaly_issues = []
+        for cat, data in anomalies.items():
+            if isinstance(data, dict) and data.get('has_issue'):
+                anomaly_issues.extend(data.get('issues', []))
+        for issue in anomaly_issues[:2]:
+            risks.append(issue)
+
+        trend_dir = monthly_trend.get('trend_direction', '')
+        if trend_dir == 'increasing':
+            next_week_suggestions.append('近期负荷上升趋势，建议下周适当安排减量日，避免过度训练')
+        elif trend_dir == 'decreasing':
+            next_week_suggestions.append('近期负荷下降，若处于恢复期可保持；若计划期可逐步恢复训练量')
+        else:
+            next_week_suggestions.append('负荷保持稳定，可在现有基础上微调训练结构')
+
+        if structure == '偏强度周':
+            next_week_suggestions.append('刚完成高强度周，下周建议以恢复和低强度有氧为主')
+        elif structure == '偏堆量周':
+            next_week_suggestions.append('堆量周后可适当加入1-2次高强度刺激，提升训练效果')
+        elif structure == '偏恢复周':
+            next_week_suggestions.append('恢复周后可逐步增加训练量或强度，进入正常训练周期')
+
+        weekly_data = monthly_trend.get('weekly_data', [])
+        injury_weeks = sum(1 for w in weekly_data if w.get('has_injury'))
+        if injury_weeks > 0:
+            confirm_questions.append(f'近 {len(weekly_data)} 周中有 {injury_weeks} 周有伤痛标记，是否需要调整训练计划？')
+
+        if not training_structure.get('has_hr_data', False):
+            confirm_questions.append('本周训练记录缺少心率数据，是否确认所有设备都已正确连接？')
+
+        if recovery_score < 70:
+            confirm_questions.append('恢复评分偏低，最近睡眠和饮食情况是否正常？')
+
+        if not highlights:
+            highlights.append('本周训练数据较少，建议保持规律训练')
+        if not next_week_suggestions:
+            next_week_suggestions.append('保持现有训练节奏，注意倾听身体反馈')
+        if not risks:
+            risks.append('暂无明显风险点，继续保持')
+        if not confirm_questions:
+            confirm_questions.append('暂无需要特别确认的问题')
+
+        return {
+            'highlights': highlights,
+            'risks': risks,
+            'next_week_suggestions': next_week_suggestions,
+            'confirm_questions': confirm_questions
+        }
 
     def _generate_recovery_combo(self, this_week: pd.DataFrame, all_df: pd.DataFrame,
                                   recovery_analysis: Optional[Dict], anomalies: Dict) -> Dict:
@@ -796,7 +999,7 @@ class WeeklyReport:
 
     def _analyze_monthly_trend(self, df: pd.DataFrame, weeks: int = 8) -> Dict:
         if df.empty:
-            return {'has_data': False, 'weeks': [], 'weekly_data': [], 'trend_analysis': '', 'trend_direction': '', 'trend_text': ''}
+            return {'has_data': False, 'weeks': [], 'weekly_data': [], 'trend_analysis': '', 'trend_direction': '', 'trend_text': '', 'trend_weeks': weeks, 'actual_weeks': 0}
 
         df = df.copy()
         df = df.sort_values('date_parsed')
@@ -892,7 +1095,9 @@ class WeeklyReport:
             'trend_direction': trend_direction,
             'load_values': load_values,
             'duration_values': duration_values,
-            'sleep_values': sleep_values
+            'sleep_values': sleep_values,
+            'trend_weeks': weeks,
+            'actual_weeks': len(weekly_data)
         }
 
     def _generate_text_report(self, summary: Dict, anomalies: Dict) -> str:
@@ -957,7 +1162,9 @@ class WeeklyReport:
                                    goal_analysis: Optional[Dict],
                                    recovery_combo: Optional[Dict] = None,
                                    monthly_trend: Optional[Dict] = None,
-                                   week_period: str = '') -> str:
+                                   week_period: str = '',
+                                   training_structure: Optional[Dict] = None,
+                                   coach_summary: Optional[Dict] = None) -> str:
         this_week = summary.get('this_week', {})
         comparison = summary.get('comparison', {})
 
@@ -965,6 +1172,23 @@ class WeeklyReport:
         md_lines.append('# 📋 训练周报\n')
         md_lines.append(f'**报告周期**: {week_period if week_period else "本周"}\n')
         md_lines.append(f'**生成时间**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
+
+        if coach_summary:
+            md_lines.append('## 🧑‍🏫 教练摘要\n')
+            md_lines.append('> 本周训练的快速解读，适合发给教练沟通\n')
+            md_lines.append('### ✅ 本周重点\n')
+            for h in coach_summary.get('highlights', []):
+                md_lines.append(f'- {h}')
+            md_lines.append('\n### ⚠️ 风险点\n')
+            for r in coach_summary.get('risks', []):
+                md_lines.append(f'- {r}')
+            md_lines.append('\n### 📅 下周建议\n')
+            for s in coach_summary.get('next_week_suggestions', []):
+                md_lines.append(f'- {s}')
+            md_lines.append('\n### ❓ 需要确认\n')
+            for q in coach_summary.get('confirm_questions', []):
+                md_lines.append(f'- {q}')
+            md_lines.append('')
 
         if recovery_combo:
             md_lines.append('## 🎯 核心指标速览\n')
@@ -1016,6 +1240,39 @@ class WeeklyReport:
                 md_lines.append(f'| {name} | {count} | {dist:.1f}km | {dur:.1f}h | {load:.0f} |')
         else:
             md_lines.append('暂无运动数据')
+
+        if training_structure and training_structure.get('has_data', False):
+            md_lines.append('\n## 🏗️ 训练结构分析\n')
+            judgment = training_structure.get('structure_judgment', '')
+            judgment_desc = training_structure.get('structure_judgment_desc', '')
+            if judgment:
+                md_lines.append(f'> **本周结构判断**: {judgment} — {judgment_desc}\n')
+
+            overall = training_structure.get('overall', {})
+            if overall:
+                md_lines.append('### 📊 整体强度分布\n')
+                md_lines.append('| 强度等级 | 时长(分钟) | 占比 |')
+                md_lines.append('|----------|-----------|------|')
+                md_lines.append(f'| 🟢 低强度 (Z1-Z2) | {overall.get("low_min", 0):.0f} | {overall.get("low_pct", 0):.1f}% |')
+                md_lines.append(f'| 🟡 中强度 (Z3) | {overall.get("moderate_min", 0):.0f} | {overall.get("moderate_pct", 0):.1f}% |')
+                md_lines.append(f'| 🔴 高强度 (Z4-Z5) | {overall.get("high_min", 0):.0f} | {overall.get("high_pct", 0):.1f}% |')
+                if overall.get('unknown_min', 0) > 0:
+                    md_lines.append(f'| ⚪ 无心率数据 | {overall.get("unknown_min", 0):.0f} | {overall.get("unknown_pct", 0):.1f}% |')
+
+            structure_by_sport = training_structure.get('by_sport', {})
+            if structure_by_sport:
+                md_lines.append('\n### 🏅 按运动类型拆分\n')
+                md_lines.append('| 运动类型 | 总时长 | 低强度 | 中强度 | 高强度 | 无心率 |')
+                md_lines.append('|----------|-------|-------|-------|-------|-------|')
+                for sport_key, sport_data in structure_by_sport.items():
+                    name = sport_data.get('name', sport_key)
+                    md_lines.append(
+                        f'| {name} | {sport_data.get("total_min", 0):.0f}min | '
+                        f'{sport_data.get("low_pct", 0):.0f}% | '
+                        f'{sport_data.get("moderate_pct", 0):.0f}% | '
+                        f'{sport_data.get("high_pct", 0):.0f}% | '
+                        f'{sport_data.get("unknown_pct", 0):.0f}% |'
+                    )
 
         if recovery_combo:
             issues = recovery_combo.get('issues', [])
@@ -1128,7 +1385,9 @@ class WeeklyReport:
                              summary: Dict, recovery_combo: Optional[Dict] = None,
                              anomalies: Optional[Dict] = None,
                              monthly_trend: Optional[Dict] = None,
-                             week_period: str = '') -> Tuple[pd.DataFrame, pd.DataFrame]:
+                             week_period: str = '',
+                             training_structure: Optional[Dict] = None,
+                             coach_summary: Optional[Dict] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
         if all_df.empty:
             return pd.DataFrame(), pd.DataFrame()
 
@@ -1156,6 +1415,18 @@ class WeeklyReport:
         summary_rows.append({'section': '=== 周报基本信息 ===', 'item': '', 'value': '', 'notes': ''})
         summary_rows.append({'section': '报告周期', 'item': week_period if week_period else '本周', 'value': '', 'notes': '数据截止日期'})
         summary_rows.append({'section': '生成时间', 'item': generated_at, 'value': '', 'notes': '报告生成时间'})
+
+        if coach_summary:
+            summary_rows.append({'section': '=== 教练摘要 ===', 'item': '', 'value': '', 'notes': ''})
+            summary_rows.append({'section': '说明', 'item': '本周训练的快速解读，适合发给教练沟通', 'value': '', 'notes': ''})
+            for i, h in enumerate(coach_summary.get('highlights', []), 1):
+                summary_rows.append({'section': f'本周重点{i}', 'item': h, 'value': '', 'notes': ''})
+            for i, r in enumerate(coach_summary.get('risks', []), 1):
+                summary_rows.append({'section': f'风险点{i}', 'item': r, 'value': '', 'notes': ''})
+            for i, s in enumerate(coach_summary.get('next_week_suggestions', []), 1):
+                summary_rows.append({'section': f'下周建议{i}', 'item': s, 'value': '', 'notes': ''})
+            for i, q in enumerate(coach_summary.get('confirm_questions', []), 1):
+                summary_rows.append({'section': f'需确认{i}', 'item': q, 'value': '', 'notes': ''})
 
         if recovery_combo:
             summary_rows.append({'section': '=== 核心指标速览 ===', 'item': '', 'value': '', 'notes': ''})
@@ -1186,6 +1457,35 @@ class WeeklyReport:
                     'value': f"{dist:.1f}km / {dur:.1f}h",
                     'notes': f"负荷{load:.0f}"
                 })
+
+        if training_structure and training_structure.get('has_data', False):
+            summary_rows.append({'section': '=== 训练结构分析 ===', 'item': '', 'value': '', 'notes': ''})
+            judgment = training_structure.get('structure_judgment', '')
+            judgment_desc = training_structure.get('structure_judgment_desc', '')
+            if judgment:
+                summary_rows.append({'section': '本周结构判断', 'item': judgment, 'value': '', 'notes': judgment_desc})
+
+            overall = training_structure.get('overall', {})
+            if overall:
+                summary_rows.append({'section': '整体强度分布', 'item': '', 'value': '', 'notes': ''})
+                summary_rows.append({'section': '低强度(Z1-Z2)', 'item': f"{overall.get('low_min', 0):.0f}分钟", 'value': '', 'notes': f"{overall.get('low_pct', 0):.1f}%"})
+                summary_rows.append({'section': '中强度(Z3)', 'item': f"{overall.get('moderate_min', 0):.0f}分钟", 'value': '', 'notes': f"{overall.get('moderate_pct', 0):.1f}%"})
+                summary_rows.append({'section': '高强度(Z4-Z5)', 'item': f"{overall.get('high_min', 0):.0f}分钟", 'value': '', 'notes': f"{overall.get('high_pct', 0):.1f}%"})
+                if overall.get('unknown_min', 0) > 0:
+                    summary_rows.append({'section': '无心率数据', 'item': f"{overall.get('unknown_min', 0):.0f}分钟", 'value': '', 'notes': f"{overall.get('unknown_pct', 0):.1f}%"})
+
+            structure_by_sport = training_structure.get('by_sport', {})
+            if structure_by_sport:
+                summary_rows.append({'section': '按运动类型强度拆分', 'item': '', 'value': '', 'notes': ''})
+                summary_rows.append({'section': '运动类型', 'item': '低强度% / 中强度% / 高强度%', 'value': '总时长', 'notes': ''})
+                for sport_key, sport_data in structure_by_sport.items():
+                    name = sport_data.get('name', sport_key)
+                    summary_rows.append({
+                        'section': name,
+                        'item': f"{sport_data.get('low_pct', 0):.0f}% / {sport_data.get('moderate_pct', 0):.0f}% / {sport_data.get('high_pct', 0):.0f}%",
+                        'value': f"{sport_data.get('total_min', 0):.0f}分钟",
+                        'notes': f"{sport_data.get('activity_count', 0)}次活动"
+                    })
 
         if recovery_combo:
             issues = recovery_combo.get('issues', [])

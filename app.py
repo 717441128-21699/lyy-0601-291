@@ -593,6 +593,78 @@ elif st.session_state.stage == 'preview':
                     st.rerun()
 
     st.markdown('')
+
+    low_conf_mask = preview_df['sport_confidence'] < 50 if 'sport_confidence' in preview_df.columns else pd.Series([False] * len(preview_df))
+    low_conf_count = low_conf_mask.sum()
+    if low_conf_count > 0:
+        st.markdown(f'#### 🤔 低置信度识别（发现 {low_conf_count} 条记录）')
+        st.caption('这些记录的运动类型识别置信度较低，可能是活动标题、备注与速度判断存在冲突，建议手动确认')
+
+        with st.expander('📋 查看并修正低置信度记录', expanded=True):
+            low_conf_df = preview_df[low_conf_mask].copy()
+            low_conf_edit_cols = ['date', 'sport_type', 'distance_km', 'duration_min',
+                                  'avg_hr', 'sport_confidence', 'activity_name', 'notes']
+            low_conf_edit_cols = [c for c in low_conf_edit_cols if c in low_conf_df.columns]
+            low_conf_display = low_conf_df[low_conf_edit_cols].copy()
+
+            low_conf_display['sport_type'] = low_conf_display['sport_type'].map(
+                lambda x: SPORT_OPTIONS.get(x, x)
+            )
+
+            if 'sport_confidence' in low_conf_display.columns:
+                low_conf_display = low_conf_display.rename(columns={'sport_confidence': '识别置信度(%)'})
+
+            st.markdown('##### ❗ 识别说明')
+            for idx, row in low_conf_df.iterrows():
+                name = row.get('activity_name', row.get('notes', ''))
+                sport = SPORT_OPTIONS.get(row.get('sport_type', ''), row.get('sport_type', ''))
+                conf = row.get('sport_confidence', 0)
+                distance = row.get('distance_km', 0)
+                duration = row.get('duration_min', 0)
+                speed = (distance / (duration / 60)) if duration > 0 else 0
+                st.warning(
+                    f"**{row.get('date', '')}** — 当前识别为 {sport} (置信度 {conf:.0f}%)\n\n"
+                    f"活动名称/备注: {name if name else '(无)'}\n"
+                    f"数据: {distance:.1f}km / {duration:.0f}min (速度 {speed:.1f}km/h)"
+                )
+
+            st.markdown('##### ✏️ 批量修正运动类型')
+            edited_low_conf = st.data_editor(
+                low_conf_display,
+                use_container_width=True,
+                num_rows='fixed',
+                column_config={
+                    'date': st.column_config.TextColumn('日期', disabled=True),
+                    'sport_type': st.column_config.SelectboxColumn(
+                        '运动类型',
+                        options=list(SPORT_OPTIONS.values()),
+                        required=True
+                    ),
+                    'distance_km': st.column_config.NumberColumn('距离(km)', disabled=True),
+                    'duration_min': st.column_config.NumberColumn('时长(min)', disabled=True),
+                    'avg_hr': st.column_config.NumberColumn('平均心率', disabled=True),
+                    '识别置信度(%)': st.column_config.NumberColumn('置信度(%)', disabled=True),
+                    'activity_name': st.column_config.TextColumn('活动名称', disabled=True),
+                    'notes': st.column_config.TextColumn('备注', disabled=True),
+                },
+                height=300,
+                hide_index=True
+            )
+
+            if st.button('💾 保存低置信度记录修正', use_container_width=True):
+                sport_reverse = {v: k for k, v in SPORT_OPTIONS.items()}
+                edited_low_conf['sport_type'] = edited_low_conf['sport_type'].map(
+                    lambda x: sport_reverse.get(x, x)
+                )
+                for idx in low_conf_df.index:
+                    if idx in edited_low_conf.index:
+                        preview_df.loc[idx, 'sport_type'] = edited_low_conf.loc[idx, 'sport_type']
+                        preview_df.loc[idx, 'sport_confidence'] = 100
+                st.session_state.preview_df = preview_df
+                st.success(f'已修正 {len(edited_low_conf)} 条记录的运动类型！')
+                st.rerun()
+
+    st.markdown('')
     with st.expander('🧹 查看清洗日志', expanded=False):
         if not preview_issues.empty:
             severity_map = {'info': 'ℹ️ 信息', 'warning': '⚠️ 警告', 'error': '❌ 错误'}
@@ -1088,6 +1160,84 @@ elif st.session_state.stage == 'analyzed':
                 )
 
         st.markdown('')
+
+        coach_summary = report.get('coach_summary', {})
+        if coach_summary:
+            st.markdown('### 🧑‍🏫 教练摘要')
+            st.caption('本周训练的快速解读，适合发给教练沟通')
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                highlights = coach_summary.get('highlights', [])
+                if highlights:
+                    st.markdown('##### ✅ 本周重点')
+                    for h in highlights:
+                        st.success(h)
+            with col_b:
+                risks = coach_summary.get('risks', [])
+                if risks:
+                    st.markdown('##### ⚠️ 风险点')
+                    for r in risks:
+                        st.warning(r)
+
+            col_c, col_d = st.columns(2)
+            with col_c:
+                suggestions = coach_summary.get('next_week_suggestions', [])
+                if suggestions:
+                    st.markdown('##### 📅 下周建议')
+                    for s in suggestions:
+                        st.info(s)
+            with col_d:
+                questions = coach_summary.get('confirm_questions', [])
+                if questions:
+                    st.markdown('##### ❓ 需要确认')
+                    for q in questions:
+                        st.error(q)
+
+            st.markdown('')
+
+        training_structure = report.get('training_structure', {})
+        if training_structure and training_structure.get('has_data', False):
+            st.markdown('### 🏗️ 训练结构分析')
+            judgment = training_structure.get('structure_judgment', '')
+            judgment_desc = training_structure.get('structure_judgment_desc', '')
+            if judgment:
+                icon_map = {
+                    '偏恢复周': '🟢',
+                    '偏堆量周': '🟡',
+                    '偏强度周': '🔴',
+                    '结构均衡周': '✅'
+                }
+                icon = icon_map.get(judgment, '📊')
+                st.info(f'**{icon} 本周结构判断: {judgment}** — {judgment_desc}')
+
+            overall = training_structure.get('overall', {})
+            if overall:
+                st.markdown('##### 📊 整体强度分布')
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                col_s1.metric('🟢 低强度', f"{overall.get('low_pct', 0):.0f}%", f"{overall.get('low_min', 0):.0f}分钟")
+                col_s2.metric('🟡 中强度', f"{overall.get('moderate_pct', 0):.0f}%", f"{overall.get('moderate_min', 0):.0f}分钟")
+                col_s3.metric('🔴 高强度', f"{overall.get('high_pct', 0):.0f}%", f"{overall.get('high_min', 0):.0f}分钟")
+                if overall.get('unknown_pct', 0) > 0:
+                    col_s4.metric('⚪ 无心率', f"{overall.get('unknown_pct', 0):.0f}%", f"{overall.get('unknown_min', 0):.0f}分钟")
+
+            structure_by_sport = training_structure.get('by_sport', {})
+            if structure_by_sport:
+                st.markdown('##### 🏅 按运动类型拆分')
+                rows = []
+                for sport_key, sport_data in structure_by_sport.items():
+                    rows.append({
+                        '运动类型': sport_data.get('name', sport_key),
+                        '活动次数': sport_data.get('activity_count', 0),
+                        '总时长(min)': f"{sport_data.get('total_min', 0):.0f}",
+                        '低强度%': f"{sport_data.get('low_pct', 0):.0f}%",
+                        '中强度%': f"{sport_data.get('moderate_pct', 0):.0f}%",
+                        '高强度%': f"{sport_data.get('high_pct', 0):.0f}%"
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            st.markdown('')
+
         charts = report.get('charts', {})
         if charts:
             st.markdown('### 📈 图表分析')
