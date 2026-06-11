@@ -101,6 +101,8 @@ if 'column_mapping' not in st.session_state:
     st.session_state.column_mapping = {}
 if 'anomaly_mask' not in st.session_state:
     st.session_state.anomaly_mask = pd.Series()
+if 'trend_weeks' not in st.session_state:
+    st.session_state.trend_weeks = 8
 if 'user_config' not in st.session_state:
     st.session_state.user_config = {
         'age': 35,
@@ -210,7 +212,8 @@ def run_analysis_pipeline():
         report_result = reporter.generate(
             clean_df,
             recovery_analysis=recovery_result,
-            goal_analysis=goal_result
+            goal_analysis=goal_result,
+            trend_weeks=st.session_state.trend_weeks
         )
         report_result['summary']['recovery_combo'] = report_result.get('recovery_combo', {})
         st.session_state.weekly_report = report_result
@@ -1036,7 +1039,12 @@ elif st.session_state.stage == 'analyzed':
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     with tab7:
-        st.markdown('<p class="section-title">📝 本周训练周报</p>', unsafe_allow_html=True)
+        week_period = report.get('week_period', '')
+        week_start = report.get('week_start', '')
+        week_end = report.get('week_end', '')
+        title_date = week_period if week_period else '本周'
+
+        st.markdown(f'<p class="section-title">📝 训练周报（{title_date}）</p>', unsafe_allow_html=True)
 
         text_report = report.get('text_report', '')
         if text_report:
@@ -1045,13 +1053,14 @@ elif st.session_state.stage == 'analyzed':
 
         st.markdown('')
         col_export1, col_export2, col_export3 = st.columns(3)
+        date_str = week_start.replace('-', '') if week_start else datetime.now().strftime("%Y%m%d")
         with col_export1:
             md_content = report.get('markdown_report', '')
             if md_content:
                 st.download_button(
                     '📥 下载 Markdown 周报',
                     data=md_content,
-                    file_name=f'训练周报_{datetime.now().strftime("%Y%m%d")}.md',
+                    file_name=f'训练周报_{date_str}.md',
                     mime='text/markdown',
                     use_container_width=True
                 )
@@ -1062,7 +1071,7 @@ elif st.session_state.stage == 'analyzed':
                 st.download_button(
                     '📊 导出全部训练数据 (CSV)',
                     data=csv_data,
-                    file_name=f'训练明细_{datetime.now().strftime("%Y%m%d")}.csv',
+                    file_name=f'训练明细_{date_str}.csv',
                     mime='text/csv',
                     use_container_width=True
                 )
@@ -1073,7 +1082,7 @@ elif st.session_state.stage == 'analyzed':
                 st.download_button(
                     '📋 导出周报汇总 (CSV)',
                     data=csv_data,
-                    file_name=f'周报汇总_{datetime.now().strftime("%Y%m%d")}.csv',
+                    file_name=f'周报汇总_{date_str}.csv',
                     mime='text/csv',
                     use_container_width=True
                 )
@@ -1111,11 +1120,52 @@ elif st.session_state.stage == 'analyzed':
         monthly_trend = report.get('monthly_trend', {})
         if monthly_trend.get('has_data', False):
             st.markdown('')
-            st.markdown('### 📈 月度训练趋势（近8周）')
+            trend_weeks = st.session_state.get('trend_weeks', 8)
+            st.markdown(f'### 📈 月度训练趋势（近{trend_weeks}周）')
 
-            trend_analysis = monthly_trend.get('trend_analysis', '')
-            if trend_analysis:
-                st.info(f'**趋势分析**: {trend_analysis}')
+            col_trend1, col_trend2 = st.columns([3, 1])
+            with col_trend1:
+                trend_analysis = monthly_trend.get('trend_analysis', '')
+                if trend_analysis:
+                    st.info(f'**趋势分析**: {trend_analysis}')
+
+                trend_direction = monthly_trend.get('trend_direction', '')
+                if trend_direction:
+                    direction_desc = {
+                        'increasing': '📈 训练负荷呈上升趋势，注意循序渐进',
+                        'decreasing': '📉 训练负荷呈下降趋势，可能处于恢复期',
+                        'stable': '➡️ 训练负荷保持稳定，持续性良好'
+                    }
+                    st.success(f'**趋势判断**: {direction_desc.get(trend_direction, trend_direction)}')
+
+                weekly_data = monthly_trend.get('weekly_data', [])
+                injury_weeks_count = sum(1 for w in weekly_data if w.get('has_injury'))
+                if injury_weeks_count > 0:
+                    st.warning(f'**伤痛情况**: 近{trend_weeks}周中有 {injury_weeks_count} 周存在伤痛记录，建议关注恢复情况')
+
+            with col_trend2:
+                st.markdown('**趋势周期**')
+                selected_weeks = st.selectbox(
+                    '选择周期',
+                    options=[4, 8, 12],
+                    index=[4, 8, 12].index(trend_weeks) if trend_weeks in [4, 8, 12] else 1,
+                    format_func=lambda x: f'近 {x} 周',
+                    label_visibility='collapsed',
+                    key='trend_weeks_select'
+                )
+                if selected_weeks != trend_weeks:
+                    st.session_state.trend_weeks = selected_weeks
+                    with st.spinner('正在更新趋势分析...'):
+                        reporter = WeeklyReport()
+                        new_report = reporter.generate(
+                            st.session_state.clean_df,
+                            recovery_analysis=st.session_state.recovery_analysis,
+                            goal_analysis=st.session_state.goal_analysis,
+                            trend_weeks=selected_weeks
+                        )
+                        new_report['summary']['recovery_combo'] = new_report.get('recovery_combo', {})
+                        st.session_state.weekly_report = new_report
+                    st.rerun()
 
             monthly_chart = charts.get('monthly_trend')
             if monthly_chart:

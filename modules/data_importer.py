@@ -26,6 +26,8 @@ class DataImporter:
              'aliases': ['date', 'Date', 'timestamp', 'Timestamp', 'start_time', 'StartTime', '开始时间', '日期', '时间', '运动时间', '训练时间', '运动日期']},
             {'key': 'sport_type', 'label': '运动类型', 'required': False,
              'aliases': ['sport_type', 'type', 'sport', 'Sport', 'Type', 'activity_type', 'Activity', '运动类型', '类型', '项目']},
+            {'key': 'activity_name', 'label': '活动名称/运动标题', 'required': False,
+             'aliases': ['activity_name', 'name', 'title', 'activity_title', 'workout_name', 'workout_title', '活动名称', '运动名称', '活动标题', '训练标题', '运动标题', '名称', '标题']},
             {'key': 'distance_km', 'label': '距离(km)', 'required': False,
              'aliases': ['distance_km', 'distance', 'Distance', '距离', '里程', '总距离', '总距离(km)', '距离(公里)', '跑步距离', '运动距离']},
             {'key': 'duration_min', 'label': '时长(min)', 'required': False,
@@ -330,6 +332,15 @@ class DataImporter:
                     if std_key in result.columns and std_key != src_col:
                         result = result.drop(columns=[std_key])
                     result = result.rename(columns={src_col: std_key})
+
+        if 'activity_name' in result.columns:
+            if 'notes' not in result.columns:
+                result['notes'] = ''
+            result['notes'] = result.apply(
+                lambda row: row['activity_name'] if pd.isna(row.get('notes')) or row.get('notes') == ''
+                else f"{row['activity_name']} - {row['notes']}",
+                axis=1
+            )
 
         for field in self.standard_fields:
             key = field['key']

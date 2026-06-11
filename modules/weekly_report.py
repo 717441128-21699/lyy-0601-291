@@ -27,10 +27,12 @@ class WeeklyReport:
         }
 
     def generate(self, df: pd.DataFrame, recovery_analysis: Optional[Dict] = None,
-                 goal_analysis: Optional[Dict] = None) -> Dict:
+                 goal_analysis: Optional[Dict] = None, trend_weeks: int = 8) -> Dict:
         if df.empty:
             return {
                 'week_period': '',
+                'week_start': '',
+                'week_end': '',
                 'summary': {},
                 'anomalies': {},
                 'charts': {},
@@ -40,15 +42,18 @@ class WeeklyReport:
                 'export_data': pd.DataFrame(),
                 'summary_export': pd.DataFrame(),
                 'monthly_trend': {},
+                'trend_weeks': trend_weeks,
                 'has_data': False
             }
 
         df = df.copy()
         df = df.sort_values('date_parsed')
 
-        today = datetime.now()
+        latest_date = df['date_parsed'].max()
+        today = latest_date.to_pydatetime()
         week_start = today - timedelta(days=today.weekday())
         last_week_start = week_start - timedelta(days=7)
+        week_end = today
 
         this_week_df = df[df['date_parsed'] >= week_start].copy()
         last_week_df = df[(df['date_parsed'] >= last_week_start) & (df['date_parsed'] < week_start)].copy()
@@ -56,19 +61,22 @@ class WeeklyReport:
         week_summary = self._calculate_week_summary(this_week_df, last_week_df)
         anomalies = self._detect_anomalies(df, this_week_df)
         recovery_combo = self._generate_recovery_combo(this_week_df, df, recovery_analysis, anomalies)
-        monthly_trend = self._analyze_monthly_trend(df)
+        monthly_trend = self._analyze_monthly_trend(df, weeks=trend_weeks)
         charts = self._generate_charts(this_week_df, df, monthly_trend)
         text_report = self._generate_text_report(week_summary, anomalies)
+        week_period = f'{week_start.strftime("%Y-%m-%d")} ~ {week_end.strftime("%Y-%m-%d")}'
         markdown_report = self._generate_markdown_report(
             week_summary, anomalies, recovery_analysis, goal_analysis,
-            recovery_combo, monthly_trend
+            recovery_combo, monthly_trend, week_period
         )
         export_data, summary_export = self._prepare_export_data(
-            df, this_week_df, week_summary, recovery_combo, anomalies, monthly_trend
+            df, this_week_df, week_summary, recovery_combo, anomalies, monthly_trend, week_period
         )
 
         return {
-            'week_period': f'{week_start.strftime("%Y-%m-%d")} ~ {today.strftime("%Y-%m-%d")}',
+            'week_period': week_period,
+            'week_start': week_start.strftime("%Y-%m-%d"),
+            'week_end': week_end.strftime("%Y-%m-%d"),
             'summary': week_summary,
             'anomalies': anomalies,
             'charts': charts,
@@ -78,6 +86,7 @@ class WeeklyReport:
             'monthly_trend': monthly_trend,
             'export_data': export_data,
             'summary_export': summary_export,
+            'trend_weeks': trend_weeks,
             'has_data': True
         }
 
@@ -947,16 +956,19 @@ class WeeklyReport:
                                    recovery_analysis: Optional[Dict],
                                    goal_analysis: Optional[Dict],
                                    recovery_combo: Optional[Dict] = None,
-                                   monthly_trend: Optional[Dict] = None) -> str:
+                                   monthly_trend: Optional[Dict] = None,
+                                   week_period: str = '') -> str:
         this_week = summary.get('this_week', {})
         comparison = summary.get('comparison', {})
 
         md_lines = []
         md_lines.append('# 📋 训练周报\n')
-        md_lines.append(f'**周期**: {summary.get("week_period", "本周")}\n')
+        md_lines.append(f'**报告周期**: {week_period if week_period else "本周"}\n')
+        md_lines.append(f'**生成时间**: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
 
         if recovery_combo:
             md_lines.append('## 🎯 核心指标速览\n')
+            md_lines.append('> 快速了解本周恢复状态和训练负荷情况\n')
             md_lines.append('| 指标 | 数值 | 说明 |')
             md_lines.append('|------|------|------|')
             md_lines.append(f'| 恢复评分 | {recovery_combo.get("recovery_score", 0)}/100 | {recovery_combo.get("recovery_level", "未知")} |')
@@ -965,6 +977,7 @@ class WeeklyReport:
             md_lines.append('')
 
         md_lines.append('## 📊 数据概览\n')
+        md_lines.append('> 本周与上周训练数据对比\n')
         md_lines.append('| 指标 | 本周 | 上周 | 变化 |')
         md_lines.append('|------|------|------|------|')
 
@@ -989,6 +1002,7 @@ class WeeklyReport:
                 md_lines.append(f'| {label} | {curr} {unit} | {prev} {unit} | {change_str} |')
 
         md_lines.append('\n## 🏃‍♂️ 运动类型明细\n')
+        md_lines.append('> 按运动类型分类的训练统计\n')
         by_sport = this_week.get('by_sport', {})
         if by_sport:
             md_lines.append('| 运动类型 | 次数 | 距离 | 时长 | 负荷 |')
@@ -1007,10 +1021,12 @@ class WeeklyReport:
             issues = recovery_combo.get('issues', [])
             if issues:
                 md_lines.append('\n## ⚠️ 问题汇总\n')
+                md_lines.append('> 本周发现的需要关注的问题\n')
                 for i, issue in enumerate(issues, 1):
                     md_lines.append(f'{i}. {issue}')
 
             md_lines.append('\n## 💪 恢复状态详情\n')
+            md_lines.append('> 恢复评分、过度训练风险、连续运动天数、睡眠情况\n')
             if recovery_analysis:
                 recovery = recovery_analysis.get('recovery_analysis', {})
                 score = recovery.get('recovery_score', 0)
@@ -1045,17 +1061,21 @@ class WeeklyReport:
 
             if anomaly_issues:
                 md_lines.append('\n### 🚨 异常检测')
+                md_lines.append('> 训练过量、低强度、平台期、心率波动等异常检测\n')
                 for issue in anomaly_issues:
                     md_lines.append(f'- {issue}')
 
             recs = recovery_combo.get('recommendations', [])
             if recs:
                 md_lines.append('\n## 💡 综合建议\n')
+                md_lines.append('> 基于本周数据给出的训练和恢复建议\n')
                 for i, rec in enumerate(recs, 1):
                     md_lines.append(f'{i}. {rec}')
 
         if monthly_trend and monthly_trend.get('has_data', False):
-            md_lines.append('\n## 📈 月度趋势（近8周）\n')
+            trend_weeks = len(monthly_trend.get('weekly_data', []))
+            md_lines.append(f'\n## 📈 月度趋势（近{trend_weeks}周）\n')
+            md_lines.append('> 训练负荷、时长、睡眠和伤痛的长期变化趋势\n')
             weeks = monthly_trend.get('weekly_data', [])
             if weeks:
                 md_lines.append('| 周次 | 总负荷 | 训练时长 | 平均睡眠 | 伤痛标记 |')
@@ -1073,8 +1093,22 @@ class WeeklyReport:
             if trend_analysis:
                 md_lines.append(f'\n**趋势分析**: {trend_analysis}')
 
+            trend_direction = monthly_trend.get('trend_direction', '')
+            if trend_direction:
+                direction_desc = {
+                    'increasing': '📈 训练负荷呈上升趋势，注意循序渐进',
+                    'decreasing': '📉 训练负荷呈下降趋势，可能处于恢复期',
+                    'stable': '➡️ 训练负荷保持稳定，持续性良好'
+                }
+                md_lines.append(f'\n**趋势判断**: {direction_desc.get(trend_direction, trend_direction)}')
+
+            injury_weeks_count = sum(1 for w in weeks if w.get('has_injury'))
+            if injury_weeks_count > 0:
+                md_lines.append(f'\n**伤痛情况**: 近{trend_weeks}周中有 {injury_weeks_count} 周存在伤痛记录，建议关注恢复情况')
+
         if goal_analysis and goal_analysis.get('has_running_data', True):
             md_lines.append('\n## 🎯 目标进度\n')
+            md_lines.append('> 跑量目标完成情况（仅跑步计入）\n')
             weekly = goal_analysis.get('weekly_goal', {})
             monthly = goal_analysis.get('monthly_goal', {})
             yearly = goal_analysis.get('yearly_goal', {})
@@ -1093,7 +1127,8 @@ class WeeklyReport:
     def _prepare_export_data(self, all_df: pd.DataFrame, this_week: pd.DataFrame,
                              summary: Dict, recovery_combo: Optional[Dict] = None,
                              anomalies: Optional[Dict] = None,
-                             monthly_trend: Optional[Dict] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                             monthly_trend: Optional[Dict] = None,
+                             week_period: str = '') -> Tuple[pd.DataFrame, pd.DataFrame]:
         if all_df.empty:
             return pd.DataFrame(), pd.DataFrame()
 
@@ -1114,19 +1149,22 @@ class WeeklyReport:
             )
 
         summary_rows = []
-        week_period = summary.get('week_period', '本周')
         this_week_stats = summary.get('this_week', {})
         last_week_stats = summary.get('last_week', {})
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        summary_rows.append({'section': '=== 周报核心指标 ===', 'item': '', 'value': '', 'notes': ''})
-        summary_rows.append({'section': '报告周期', 'item': week_period, 'value': '', 'notes': ''})
+        summary_rows.append({'section': '=== 周报基本信息 ===', 'item': '', 'value': '', 'notes': ''})
+        summary_rows.append({'section': '报告周期', 'item': week_period if week_period else '本周', 'value': '', 'notes': '数据截止日期'})
+        summary_rows.append({'section': '生成时间', 'item': generated_at, 'value': '', 'notes': '报告生成时间'})
 
         if recovery_combo:
-            summary_rows.append({'section': '恢复评分', 'item': f"{recovery_combo.get('recovery_score', 0)}/100", 'value': '', 'notes': recovery_combo.get('recovery_level', '')})
+            summary_rows.append({'section': '=== 核心指标速览 ===', 'item': '', 'value': '', 'notes': ''})
+            summary_rows.append({'section': '恢复评分', 'item': f"{recovery_combo.get('recovery_score', 0)}/100", 'value': '', 'notes': recovery_combo.get('recovery_level', '未知')})
             summary_rows.append({'section': '7天总负荷', 'item': f"{recovery_combo.get('total_load_7d', 0):.0f}", 'value': '', 'notes': '含所有运动类型'})
-            summary_rows.append({'section': '发现问题数', 'item': f"{recovery_combo.get('issue_count', 0)}", 'value': '', 'notes': '需要关注'})
+            summary_rows.append({'section': '发现问题数', 'item': f"{recovery_combo.get('issue_count', 0)}", 'value': '', 'notes': '需要关注的问题数量'})
 
         summary_rows.append({'section': '=== 本周数据概览 ===', 'item': '', 'value': '', 'notes': ''})
+        summary_rows.append({'section': '说明', 'item': '本周与上周训练数据对比', 'value': '', 'notes': ''})
         summary_rows.append({'section': '总活动次数', 'item': f"{this_week_stats.get('total_activities', 0)}", 'value': f"{last_week_stats.get('total_activities', 0)}", 'notes': '上周值'})
         summary_rows.append({'section': '总训练时长(小时)', 'item': f"{this_week_stats.get('total_duration_h', 0):.1f}", 'value': f"{last_week_stats.get('total_duration_h', 0):.1f}", 'notes': '上周值'})
         summary_rows.append({'section': '总训练距离(km)', 'item': f"{this_week_stats.get('total_distance_km', 0):.1f}", 'value': f"{last_week_stats.get('total_distance_km', 0):.1f}", 'notes': '上周值'})
@@ -1135,6 +1173,7 @@ class WeeklyReport:
         by_sport = this_week_stats.get('by_sport', {})
         if by_sport:
             summary_rows.append({'section': '=== 运动类型明细 ===', 'item': '', 'value': '', 'notes': ''})
+            summary_rows.append({'section': '说明', 'item': '按运动类型分类的训练统计', 'value': '', 'notes': ''})
             for sport_key, sport_data in by_sport.items():
                 name = sport_data.get('name', sport_key)
                 count = sport_data.get('count', 0)
@@ -1152,12 +1191,14 @@ class WeeklyReport:
             issues = recovery_combo.get('issues', [])
             if issues:
                 summary_rows.append({'section': '=== 问题汇总 ===', 'item': '', 'value': '', 'notes': ''})
+                summary_rows.append({'section': '说明', 'item': '本周发现的需要关注的问题', 'value': '', 'notes': ''})
                 for i, issue in enumerate(issues, 1):
                     summary_rows.append({'section': f'问题{i}', 'item': issue, 'value': '', 'notes': ''})
 
             recs = recovery_combo.get('recommendations', [])
             if recs:
                 summary_rows.append({'section': '=== 综合建议 ===', 'item': '', 'value': '', 'notes': ''})
+                summary_rows.append({'section': '说明', 'item': '基于本周数据给出的训练和恢复建议', 'value': '', 'notes': ''})
                 for i, rec in enumerate(recs, 1):
                     summary_rows.append({'section': f'建议{i}', 'item': rec, 'value': '', 'notes': ''})
 
@@ -1168,13 +1209,16 @@ class WeeklyReport:
                     anomaly_issues.extend(data.get('issues', []))
             if anomaly_issues:
                 summary_rows.append({'section': '=== 异常检测 ===', 'item': '', 'value': '', 'notes': ''})
+                summary_rows.append({'section': '说明', 'item': '训练过量、低强度、平台期、心率波动等异常检测', 'value': '', 'notes': ''})
                 for i, issue in enumerate(anomaly_issues, 1):
                     summary_rows.append({'section': f'异常{i}', 'item': issue, 'value': '', 'notes': ''})
 
         if monthly_trend and monthly_trend.get('has_data'):
             weekly_data = monthly_trend.get('weekly_data', [])
+            trend_weeks = len(weekly_data)
             if weekly_data:
-                summary_rows.append({'section': '=== 近8周趋势 ===', 'item': '', 'value': '', 'notes': ''})
+                summary_rows.append({'section': f'=== 近{trend_weeks}周趋势 ===', 'item': '', 'value': '', 'notes': ''})
+                summary_rows.append({'section': '说明', 'item': '训练负荷、时长、睡眠和伤痛的长期变化趋势', 'value': '', 'notes': ''})
                 for wk in weekly_data:
                     injury_flag = ' ⚠️伤痛' if wk.get('has_injury', False) else ''
                     sleep_str = f"{wk.get('avg_sleep_h', 0):.1f}h" if wk.get('avg_sleep_h') else '无睡眠'
@@ -1188,7 +1232,21 @@ class WeeklyReport:
             if trend_analysis:
                 summary_rows.append({'section': '趋势分析', 'item': trend_analysis, 'value': '', 'notes': ''})
 
-        summary_rows.append({'section': f'报告生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 'item': '', 'value': '', 'notes': ''})
+            trend_direction = monthly_trend.get('trend_direction', '')
+            if trend_direction:
+                direction_desc = {
+                    'increasing': '训练负荷呈上升趋势，注意循序渐进',
+                    'decreasing': '训练负荷呈下降趋势，可能处于恢复期',
+                    'stable': '训练负荷保持稳定，持续性良好'
+                }
+                summary_rows.append({'section': '趋势判断', 'item': direction_desc.get(trend_direction, trend_direction), 'value': '', 'notes': ''})
+
+            injury_weeks_count = sum(1 for w in weekly_data if w.get('has_injury'))
+            if injury_weeks_count > 0:
+                summary_rows.append({'section': '伤痛情况', 'item': f'近{trend_weeks}周中有 {injury_weeks_count} 周存在伤痛记录，建议关注恢复情况', 'value': '', 'notes': ''})
+
+        summary_rows.append({'section': f'=== 报告结束 ===', 'item': '', 'value': '', 'notes': ''})
+        summary_rows.append({'section': '报告生成时间', 'item': generated_at, 'value': '', 'notes': ''})
 
         df_summary = pd.DataFrame(summary_rows)
 
