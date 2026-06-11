@@ -16,7 +16,20 @@ class GoalTracker:
 
     def analyze(self, df: pd.DataFrame) -> Dict:
         if df.empty:
-            return {}
+            return {
+                'weekly_goal': {},
+                'monthly_goal': {},
+                'yearly_goal': {},
+                'streaks': {},
+                'trend': {},
+                'all_sports_summary': {},
+                'goals_config': {
+                    'weekly_distance_km': self.weekly_distance_goal_km,
+                    'monthly_distance_km': self.monthly_distance_goal_km,
+                    'yearly_distance_km': self.yearly_distance_goal_km
+                },
+                'has_running_data': False
+            }
 
         df = df.copy()
         running_df = df[df['sport_type'] == 'running'].copy()
@@ -26,6 +39,9 @@ class GoalTracker:
         yearly_goal = self._track_yearly_goal(running_df)
         streak_info = self._calculate_streaks(running_df)
         trend = self._analyze_progress_trend(running_df)
+        all_sports = self._summarize_all_sports(df)
+
+        has_running_data = len(running_df) > 0
 
         return {
             'weekly_goal': weekly_goal,
@@ -33,11 +49,13 @@ class GoalTracker:
             'yearly_goal': yearly_goal,
             'streaks': streak_info,
             'trend': trend,
+            'all_sports_summary': all_sports,
             'goals_config': {
                 'weekly_distance_km': self.weekly_distance_goal_km,
                 'monthly_distance_km': self.monthly_distance_goal_km,
                 'yearly_distance_km': self.yearly_distance_goal_km
-            }
+            },
+            'has_running_data': has_running_data
         }
 
     def _track_weekly_goal(self, running_df: pd.DataFrame) -> Dict:
@@ -50,10 +68,13 @@ class GoalTracker:
             (running_df['date_parsed'] <= week_end)
         ].copy()
 
-        distance_so_far = week_df['distance_km'].sum()
+        distance_so_far = week_df['distance_km'].sum() if 'distance_km' in week_df.columns else 0
         runs_count = len(week_df)
-        duration_min = week_df['duration_min'].sum()
-        avg_pace = week_df['avg_pace_min_km'].mean() if week_df['avg_pace_min_km'].notna().any() else None
+        duration_min = week_df['duration_min'].sum() if 'duration_min' in week_df.columns else 0
+
+        avg_pace = None
+        if 'avg_pace_min_km' in week_df.columns and week_df['avg_pace_min_km'].notna().any():
+            avg_pace = week_df['avg_pace_min_km'].mean()
 
         days_passed = today.weekday() + 1
         days_total = 7
@@ -80,13 +101,17 @@ class GoalTracker:
             'days_passed': days_passed,
             'days_left': days_left,
             'avg_needed_per_day_km': round(avg_needed, 2),
-            'on_track': pace_diff >= -10
+            'on_track': pace_diff >= -10,
+            'has_data': runs_count > 0
         }
 
     def _track_monthly_goal(self, running_df: pd.DataFrame) -> Dict:
         today = datetime.now()
         month_start = today.replace(day=1)
-        next_month = month_start.replace(month=month_start.month + 1) if month_start.month < 12 else month_start.replace(year=month_start.year + 1, month=1)
+        if month_start.month < 12:
+            next_month = month_start.replace(month=month_start.month + 1)
+        else:
+            next_month = month_start.replace(year=month_start.year + 1, month=1)
         month_end = next_month - timedelta(days=1)
         _, days_in_month = monthrange(today.year, today.month)
 
@@ -95,12 +120,18 @@ class GoalTracker:
             (running_df['date_parsed'] <= month_end)
         ].copy()
 
-        distance_so_far = month_df['distance_km'].sum()
+        distance_so_far = month_df['distance_km'].sum() if 'distance_km' in month_df.columns else 0
         runs_count = len(month_df)
-        duration_min = month_df['duration_min'].sum()
-        avg_pace = month_df['avg_pace_min_km'].mean() if month_df['avg_pace_min_km'].notna().any() else None
+        duration_min = month_df['duration_min'].sum() if 'duration_min' in month_df.columns else 0
+
+        avg_pace = None
+        if 'avg_pace_min_km' in month_df.columns and month_df['avg_pace_min_km'].notna().any():
+            avg_pace = month_df['avg_pace_min_km'].mean()
+
         total_elevation = month_df['elevation_gain_m'].sum() if 'elevation_gain_m' in month_df.columns else 0
-        avg_load = month_df['training_load'].mean() if 'training_load' in month_df.columns and month_df['training_load'].notna().any() else None
+        avg_load = None
+        if 'training_load' in month_df.columns and month_df['training_load'].notna().any():
+            avg_load = month_df['training_load'].mean()
 
         days_passed = today.day
         progress_pct = (distance_so_far / self.monthly_distance_goal_km * 100) if self.monthly_distance_goal_km > 0 else 0
@@ -133,7 +164,8 @@ class GoalTracker:
             'avg_needed_per_day_km': round(avg_needed, 2),
             'avg_per_run_km': round(distance_so_far / runs_count, 2) if runs_count > 0 else 0,
             'on_track': pace_diff >= -10,
-            'past_3_months': last_3_months
+            'past_3_months': last_3_months,
+            'has_data': runs_count > 0
         }
 
     def _get_past_months_data(self, running_df: pd.DataFrame, today: datetime, months_count: int) -> List[Dict]:
@@ -169,9 +201,9 @@ class GoalTracker:
             (running_df['date_parsed'] <= year_end)
         ].copy()
 
-        distance_so_far = year_df['distance_km'].sum()
+        distance_so_far = year_df['distance_km'].sum() if 'distance_km' in year_df.columns else 0
         runs_count = len(year_df)
-        duration_min = year_df['duration_min'].sum()
+        duration_min = year_df['duration_min'].sum() if 'duration_min' in year_df.columns else 0
 
         day_of_year = today.timetuple().tm_yday
         progress_pct = (distance_so_far / self.yearly_distance_goal_km * 100) if self.yearly_distance_goal_km > 0 else 0
@@ -197,7 +229,8 @@ class GoalTracker:
             'days_in_year': days_in_year,
             'days_left': days_left,
             'avg_needed_per_day_km': round(avg_needed, 2),
-            'on_track': pace_diff >= -10
+            'on_track': pace_diff >= -10,
+            'has_data': runs_count > 0
         }
 
     def _calculate_streaks(self, running_df: pd.DataFrame) -> Dict:
@@ -205,7 +238,8 @@ class GoalTracker:
             return {
                 'current_streak_days': 0,
                 'longest_streak_days': 0,
-                'current_week_streak': 0
+                'current_week_run_days': 0,
+                'has_data': False
             }
 
         running_dates = sorted(set(running_df['date_parsed'].dt.date))
@@ -218,15 +252,16 @@ class GoalTracker:
             check_date -= timedelta(days=1)
 
         longest_streak = 0
-        temp_streak = 1
-        for i in range(1, len(running_dates)):
-            diff = (running_dates[i] - running_dates[i-1]).days
-            if diff == 1:
-                temp_streak += 1
-            else:
-                longest_streak = max(longest_streak, temp_streak)
-                temp_streak = 1
-        longest_streak = max(longest_streak, temp_streak)
+        if running_dates:
+            temp_streak = 1
+            for i in range(1, len(running_dates)):
+                diff = (running_dates[i] - running_dates[i-1]).days
+                if diff == 1:
+                    temp_streak += 1
+                else:
+                    longest_streak = max(longest_streak, temp_streak)
+                    temp_streak = 1
+            longest_streak = max(longest_streak, temp_streak)
 
         this_week_start = today - timedelta(days=today.weekday())
         week_run_days = sum(1 for d in running_dates if d >= this_week_start and d <= today)
@@ -234,24 +269,26 @@ class GoalTracker:
         return {
             'current_streak_days': current_streak,
             'longest_streak_days': longest_streak,
-            'current_week_run_days': week_run_days
+            'current_week_run_days': week_run_days,
+            'has_data': True
         }
 
     def _analyze_progress_trend(self, running_df: pd.DataFrame) -> Dict:
-        if len(running_df) < 10:
+        if len(running_df) < 5:
             return {
                 'status': '数据不足',
                 'weekly_avg_recent': 0,
                 'weekly_avg_prior': 0,
                 'change_pct': 0,
-                'pace_trend': '稳定',
-                'pace_change_pct': 0
+                'pace_trend': '数据不足',
+                'pace_change_pct': 0,
+                'has_data': False
             }
 
         df_sorted = running_df.sort_values('date_parsed')
 
-        total_weeks = len(df_sorted)
-        mid_point = total_weeks // 2
+        total = len(df_sorted)
+        mid_point = total // 2
 
         recent = df_sorted.tail(mid_point)
         prior = df_sorted.head(mid_point)
@@ -259,25 +296,25 @@ class GoalTracker:
         recent_avg_dist = recent['distance_km'].mean()
         prior_avg_dist = prior['distance_km'].mean()
 
+        change_pct = 0
         if prior_avg_dist > 0:
             change_pct = ((recent_avg_dist - prior_avg_dist) / prior_avg_dist) * 100
-        else:
-            change_pct = 0
-
-        recent_paces = recent['avg_pace_min_km'].dropna()
-        prior_paces = prior['avg_pace_min_km'].dropna()
 
         pace_trend = '稳定'
         pace_change_pct = 0
-        if len(recent_paces) >= 3 and len(prior_paces) >= 3:
-            recent_avg_pace = recent_paces.mean()
-            prior_avg_pace = prior_paces.mean()
-            if prior_avg_pace > 0:
-                pace_change_pct = ((prior_avg_pace - recent_avg_pace) / prior_avg_pace) * 100
-                if pace_change_pct > 3:
-                    pace_trend = '进步'
-                elif pace_change_pct < -3:
-                    pace_trend = '退步'
+        if 'avg_pace_min_km' in df_sorted.columns:
+            recent_paces = recent['avg_pace_min_km'].dropna()
+            prior_paces = prior['avg_pace_min_km'].dropna()
+
+            if len(recent_paces) >= 2 and len(prior_paces) >= 2:
+                recent_avg_pace = recent_paces.mean()
+                prior_avg_pace = prior_paces.mean()
+                if prior_avg_pace > 0:
+                    pace_change_pct = ((prior_avg_pace - recent_avg_pace) / prior_avg_pace) * 100
+                    if pace_change_pct > 3:
+                        pace_trend = '进步'
+                    elif pace_change_pct < -3:
+                        pace_trend = '退步'
 
         if change_pct > 10:
             status = '里程上升趋势'
@@ -292,8 +329,34 @@ class GoalTracker:
             'weekly_avg_prior_km': round(prior_avg_dist, 2),
             'distance_change_pct': round(change_pct, 1),
             'pace_trend': pace_trend,
-            'pace_change_pct': round(pace_change_pct, 1)
+            'pace_change_pct': round(pace_change_pct, 1),
+            'has_data': True
         }
+
+    def _summarize_all_sports(self, df: pd.DataFrame) -> Dict:
+        if df.empty:
+            return {}
+
+        sport_names = {
+            'running': '跑步',
+            'cycling': '骑行',
+            'strength': '力量训练',
+            'walking': '步行',
+            'swimming': '游泳',
+            'other': '其他'
+        }
+
+        result = {}
+        for sport in df['sport_type'].unique():
+            sport_df = df[df['sport_type'] == sport]
+            result[sport] = {
+                'name': sport_names.get(sport, sport),
+                'count': len(sport_df),
+                'total_distance_km': round(sport_df['distance_km'].sum(), 2),
+                'total_duration_h': round(sport_df['duration_min'].sum() / 60, 2)
+            }
+
+        return result
 
     def _format_pace(self, pace_min_km: Optional[float]) -> str:
         if pace_min_km is None or pd.isna(pace_min_km) or pace_min_km <= 0:

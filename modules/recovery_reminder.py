@@ -14,7 +14,15 @@ class RecoveryReminder:
 
     def analyze(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
         if df.empty:
-            return df, {}
+            return df, {
+                'recovery_analysis': {},
+                'rest_day_analysis': {},
+                'overtraining_risk': {},
+                'reminders': [],
+                'injury_count': 0,
+                'sleep_issues_count': 0,
+                'has_data': False
+            }
 
         df = df.copy()
         df = df.sort_values('date_parsed').reset_index(drop=True)
@@ -38,7 +46,8 @@ class RecoveryReminder:
             'overtraining_risk': overtraining_risk,
             'reminders': reminders,
             'injury_count': int(df['is_injured'].sum()) if 'is_injured' in df.columns else 0,
-            'sleep_issues_count': int((df['sleep_flag'] == True).sum()) if 'sleep_flag' in df.columns else 0
+            'sleep_issues_count': int((df['sleep_flag'] == True).sum()) if 'sleep_flag' in df.columns else 0,
+            'has_data': True
         }
 
         return df, analysis
@@ -50,8 +59,9 @@ class RecoveryReminder:
             notes = str(row.get('notes', '')).lower().strip()
             pain_keywords = [
                 '伤痛', '疼痛', '受伤', '痛', 'injury', 'pain', 'hurt', 'sore',
-                '膝盖', '跟腱', '脚踝', '胫骨', '小腿', '大腿', '膝盖', '背部',
-                'knee', 'ankle', 'achilles', 'shin', 'calf', 'thigh', 'back'
+                '膝盖', '跟腱', '脚踝', '胫骨', '小腿', '大腿', '背部',
+                'knee', 'ankle', 'achilles', 'shin', 'calf', 'thigh', 'back',
+                '劳损', '拉伤', '扭伤', 'strain', 'sprain'
             ]
             is_injured = any(k in injury for k in pain_keywords) or any(k in notes for k in pain_keywords)
             flags.append(is_injured)
@@ -62,15 +72,18 @@ class RecoveryReminder:
         flags = []
         for _, row in df.iterrows():
             sleep = row.get('sleep_hours')
-            if pd.isna(sleep) or sleep is None:
+            if pd.isna(sleep) or sleep is None or sleep == 0:
                 qualities.append('无数据')
                 flags.append(False)
+            elif sleep < 5:
+                qualities.append('严重不足')
+                flags.append(True)
             elif sleep < 6:
                 qualities.append('不足')
                 flags.append(True)
             elif sleep < self.recommended_sleep_hours:
                 qualities.append('一般')
-                flags.append(True)
+                flags.append(False)
             elif sleep <= 9:
                 qualities.append('良好')
                 flags.append(False)
@@ -85,20 +98,31 @@ class RecoveryReminder:
 
         recent_df = df[df['date_parsed'] >= last_7_days].copy()
         recent_running = recent_df[recent_df['sport_type'] == 'running']
+        recent_all = recent_df[recent_df['sport_type'].isin(['running', 'cycling', 'strength', 'walking', 'swimming'])]
 
-        total_load = recent_running['training_load'].sum() if 'training_load' in recent_running.columns else 0
-        total_distance = recent_running['distance_km'].sum()
-        total_duration = recent_running['duration_min'].sum()
+        total_load_all = recent_all['training_load'].sum() if 'training_load' in recent_all.columns else 0
+        total_load_running = recent_running['training_load'].sum() if 'training_load' in recent_running.columns else 0
+
+        total_distance_running = recent_running['distance_km'].sum()
+        total_duration_running = recent_running['duration_min'].sum()
+        total_duration_all = recent_all['duration_min'].sum()
+
+        days_with_activity = recent_all['date_parsed'].dt.date.nunique()
         days_with_running = recent_running['date_parsed'].dt.date.nunique()
 
-        avg_sleep = recent_df['sleep_hours'].mean() if 'sleep_hours' in recent_df.columns and recent_df['sleep_hours'].notna().any() else None
+        avg_sleep = None
+        if 'sleep_hours' in recent_df.columns and recent_df['sleep_hours'].notna().any():
+            avg_sleep = recent_df['sleep_hours'].dropna().mean()
 
-        recovery_score = self._calculate_recovery_score(total_load, days_with_running, avg_sleep)
+        recovery_score = self._calculate_recovery_score(total_load_all, days_with_activity, avg_sleep)
 
         return {
-            '7day_total_load': round(total_load, 1),
-            '7day_total_distance_km': round(total_distance, 2),
-            '7day_total_duration_h': round(total_duration / 60, 2),
+            '7day_total_load': round(total_load_all, 1),
+            '7day_running_load': round(total_load_running, 1),
+            '7day_total_distance_km': round(total_distance_running, 2),
+            '7day_total_duration_h': round(total_duration_all / 60, 2),
+            '7day_running_duration_h': round(total_duration_running / 60, 2),
+            '7day_days_with_activity': int(days_with_activity),
             '7day_days_with_running': int(days_with_running),
             '7day_avg_sleep_h': round(avg_sleep, 1) if avg_sleep else None,
             'recovery_score': recovery_score['score'],
@@ -110,12 +134,15 @@ class RecoveryReminder:
         score = 100
         details = []
 
-        if load > 1200:
+        if load > 1500:
             score -= 30
+            details.append('近7天训练负荷很高')
+        elif load > 1000:
+            score -= 20
             details.append('近7天训练负荷较高')
-        elif load > 800:
-            score -= 15
-            details.append('近7天训练负荷中等偏高')
+        elif load > 600:
+            score -= 10
+            details.append('近7天训练负荷中等')
 
         if days_active >= 6:
             score -= 20
@@ -125,11 +152,14 @@ class RecoveryReminder:
             details.append('近7天训练较频繁')
 
         if avg_sleep is not None:
-            if avg_sleep < 6:
-                score -= 25
+            if avg_sleep < 5.5:
+                score -= 30
                 details.append(f'平均睡眠仅{avg_sleep:.1f}小时，严重不足')
-            elif avg_sleep < 7:
-                score -= 15
+            elif avg_sleep < 6.5:
+                score -= 20
+                details.append(f'平均睡眠{avg_sleep:.1f}小时，不足')
+            elif avg_sleep < 7.5:
+                score -= 10
                 details.append(f'平均睡眠{avg_sleep:.1f}小时，略低于推荐量')
             elif avg_sleep >= 8:
                 score += 10
@@ -156,7 +186,9 @@ class RecoveryReminder:
         last_7_days = today - timedelta(days=7)
 
         recent_df = df[df['date_parsed'] >= last_7_days].copy()
-        active_dates = set(recent_df[recent_df['sport_type'].isin(['running', 'cycling', 'strength'])]['date_parsed'].dt.date)
+        active_dates = set(recent_df[recent_df['sport_type'].isin(
+            ['running', 'cycling', 'strength', 'walking', 'swimming']
+        )]['date_parsed'].dt.date)
 
         week_start = today - timedelta(days=today.weekday())
         all_dates = set()
@@ -165,19 +197,22 @@ class RecoveryReminder:
 
         rest_dates = sorted(all_dates - active_dates)
 
-        consecutive_streak = self._get_current_streak(df, today)
+        streak_info = self._get_current_streak(df, today)
 
         return {
             'rest_dates_this_week': [d.isoformat() for d in rest_dates],
             'rest_days_count_this_week': len(rest_dates),
-            'consecutive_days_running': consecutive_streak['running_streak'],
-            'consecutive_days_any': consecutive_streak['any_streak'],
-            'needs_rest_urgent': consecutive_streak['running_streak'] >= self.consecutive_runs_before_rest
+            'consecutive_days_running': streak_info['running_streak'],
+            'consecutive_days_any': streak_info['any_streak'],
+            'needs_rest_urgent': streak_info['running_streak'] >= self.consecutive_runs_before_rest,
+            'needs_rest_any': streak_info['any_streak'] >= self.consecutive_runs_before_rest + 1
         }
 
     def _get_current_streak(self, df: pd.DataFrame, today: datetime) -> Dict:
         running_dates = set(df[df['sport_type'] == 'running']['date_parsed'].dt.date)
-        any_dates = set(df[df['sport_type'].isin(['running', 'cycling', 'strength'])]['date_parsed'].dt.date)
+        any_dates = set(df[df['sport_type'].isin(
+            ['running', 'cycling', 'strength', 'walking', 'swimming']
+        )]['date_parsed'].dt.date)
 
         running_streak = 0
         any_streak = 0
@@ -198,8 +233,13 @@ class RecoveryReminder:
         }
 
     def _assess_overtraining_risk(self, df: pd.DataFrame) -> Dict:
-        if len(df) < 7:
-            return {'risk_level': '数据不足', 'risk_score': 0, 'indicators': []}
+        if len(df) < 3:
+            return {
+                'risk_level': '数据不足',
+                'risk_score': 0,
+                'indicators': ['数据量不足，建议积累更多训练记录后评估'],
+                'has_data': False
+            }
 
         df_sorted = df.sort_values('date_parsed')
         risk_score = 0
@@ -207,38 +247,43 @@ class RecoveryReminder:
 
         if 'training_load' in df.columns and df['training_load'].notna().any():
             recent_loads = df_sorted.tail(14)['training_load'].values
-            if len(recent_loads) >= 7:
-                recent_avg = np.mean(recent_loads[-7:])
-                prior_avg = np.mean(recent_loads[:7]) if len(recent_loads) >= 14 else recent_avg
-                if prior_avg > 0 and recent_avg / prior_avg > 1.5:
-                    risk_score += 30
-                    indicators.append(f'近7天训练负荷环比增长{((recent_avg/prior_avg)-1)*100:.0f}%')
+            valid_loads = [l for l in recent_loads if l and not pd.isna(l)]
+            if len(valid_loads) >= 4:
+                n = min(7, len(valid_loads) // 2)
+                if n > 0:
+                    recent_avg = np.mean(valid_loads[-n:])
+                    prior_avg = np.mean(valid_loads[:-n]) if len(valid_loads[:-n]) > 0 else recent_avg
+                    if prior_avg > 0 and recent_avg / prior_avg > 1.5:
+                        risk_score += 30
+                        indicators.append(f'近期训练负荷环比增长{((recent_avg/prior_avg)-1)*100:.0f}%')
 
         last_date = df_sorted['date_parsed'].max()
         today = datetime.now()
-        since_last = (today - last_date).days if pd.notna(last_date) else 0
+        since_last = (today - last_date).days if pd.notna(last_date) else 999
 
-        if since_last <= 1:
-            performance_df = df_sorted[df_sorted['sport_type'] == 'running'].tail(10)
-            if len(performance_df) >= 5:
-                paces = performance_df['avg_pace_min_km'].dropna().values
+        if since_last <= 2:
+            running_df = df_sorted[df_sorted['sport_type'] == 'running']
+            if len(running_df) >= 5:
+                paces = running_df['avg_pace_min_km'].dropna().values
                 if len(paces) >= 5:
-                    recent_pace = np.mean(paces[-3:])
-                    earlier_pace = np.mean(paces[:-3])
-                    if earlier_pace > 0 and recent_pace > earlier_pace * 1.1:
-                        risk_score += 25
-                        indicators.append('近期配速明显下降，可能存在疲劳')
+                    n_recent = min(3, len(paces) // 3)
+                    if n_recent > 0 and len(paces) > n_recent:
+                        recent_pace = np.mean(paces[-n_recent:])
+                        earlier_pace = np.mean(paces[:-n_recent])
+                        if earlier_pace > 0 and recent_pace > earlier_pace * 1.08:
+                            risk_score += 25
+                            indicators.append('近期配速明显下降，可能存在疲劳')
 
         if 'sleep_hours' in df.columns:
             recent_sleep = df_sorted.tail(7)['sleep_hours'].dropna()
-            if len(recent_sleep) >= 5 and recent_sleep.mean() < 6.5:
+            if len(recent_sleep) >= 3 and recent_sleep.mean() < 6.5:
                 risk_score += 25
                 indicators.append(f'近7天平均睡眠仅{recent_sleep.mean():.1f}小时')
 
         injuries = df_sorted.tail(14)['is_injured'].sum() if 'is_injured' in df_sorted.columns else 0
         if injuries > 0:
             risk_score += 20
-            indicators.append('近期存在伤痛记录')
+            indicators.append(f'近期存在{int(injuries)}条伤痛记录')
 
         if risk_score >= 60:
             level = '高风险'
@@ -252,7 +297,8 @@ class RecoveryReminder:
         return {
             'risk_level': level,
             'risk_score': risk_score,
-            'indicators': indicators if indicators else ['各项指标正常']
+            'indicators': indicators if indicators else ['各项指标正常'],
+            'has_data': True
         }
 
     def _generate_reminders(self, df: pd.DataFrame, recovery: Dict,
@@ -283,12 +329,12 @@ class RecoveryReminder:
                 'message': '; '.join(overtraining.get('indicators', []))
             })
 
-        if rest_days.get('rest_days_count_this_week', 0) < self.weekly_rest_days:
+        if rest_days.get('rest_days_count_this_week', 7) < self.weekly_rest_days:
             reminders.append({
                 'type': 'info',
                 'priority': 'medium',
                 'title': '休息日提醒',
-                'message': f'本周仅休息{rest_days["rest_days_count_this_week"]}天，建议至少安排{self.weekly_rest_days}个休息日'
+                'message': f'本周仅休息{rest_days.get("rest_days_count_this_week", 0)}天，建议至少安排{self.weekly_rest_days}个休息日'
             })
 
         today = datetime.now().date()

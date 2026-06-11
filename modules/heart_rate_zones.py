@@ -64,8 +64,8 @@ class HeartRateZones:
         ]
         return zones
 
-    def get_zone_for_hr(self, hr: float) -> Optional[Dict]:
-        if not hr:
+    def get_zone_for_hr(self, hr: Optional[float]) -> Optional[Dict]:
+        if hr is None or pd.isna(hr) or hr <= 0:
             return None
         for zone in self.zones:
             if zone['min_hr'] <= hr < zone['max_hr']:
@@ -74,13 +74,23 @@ class HeartRateZones:
             return self.zones[-1]
         return None
 
-    def get_zone_name(self, hr: float) -> str:
+    def get_zone_name(self, hr: Optional[float]) -> str:
         zone = self.get_zone_for_hr(hr)
-        return zone['name'] if zone else '未知'
+        return zone['name'] if zone else '未知/无心率'
 
     def analyze(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
         if df.empty:
-            return df, {}
+            return df, {
+                'zones_definition': self.zones,
+                'zone_stats': {},
+                'zone_distribution': {},
+                'training_balance': {},
+                'by_sport': {},
+                'resting_hr': self.resting_hr,
+                'max_hr': self.max_hr,
+                'hrr': round(self.hrr, 1),
+                'has_hr_data': False
+            }
 
         df = df.copy()
 
@@ -89,15 +99,22 @@ class HeartRateZones:
         zone_stats = self._calculate_zone_stats(df)
         zone_distribution = self._zone_distribution(df)
         training_balance = self._assess_training_balance(df)
+        by_sport = self._analyze_by_sport(df)
+
+        has_hr_data = df['avg_hr'].notna().any() if 'avg_hr' in df.columns else False
 
         analysis = {
             'zones_definition': self.zones,
             'zone_stats': zone_stats,
             'zone_distribution': zone_distribution,
             'training_balance': training_balance,
+            'by_sport': by_sport,
             'resting_hr': self.resting_hr,
             'max_hr': self.max_hr,
-            'hrr': round(self.hrr, 1)
+            'hrr': round(self.hrr, 1),
+            'has_hr_data': has_hr_data,
+            'total_with_hr': int(df['avg_hr'].notna().sum()) if 'avg_hr' in df.columns else 0,
+            'total_without_hr': int(df['avg_hr'].isna().sum()) if 'avg_hr' in df.columns else len(df)
         }
 
         return df, analysis
@@ -108,12 +125,13 @@ class HeartRateZones:
             zone_name = zone['name']
             zone_df = df[df['hr_zone'] == zone_name]
             if len(zone_df) > 0:
+                has_hr = zone_df[zone_df['avg_hr'].notna()]
                 stats[zone_name] = {
                     'count': len(zone_df),
                     'total_duration_min': round(zone_df['duration_min'].sum(), 1),
-                    'avg_duration_min': round(zone_df['duration_min'].mean(), 1),
+                    'avg_duration_min': round(zone_df['duration_min'].mean(), 1) if len(zone_df) > 0 else 0,
                     'total_distance_km': round(zone_df['distance_km'].sum(), 2),
-                    'avg_hr': round(zone_df['avg_hr'].mean(), 1) if zone_df['avg_hr'].notna().any() else None,
+                    'avg_hr': round(has_hr['avg_hr'].mean(), 1) if not has_hr.empty else None,
                     'total_load': round(zone_df['training_load'].sum(), 1) if 'training_load' in zone_df.columns else 0
                 }
             else:
@@ -128,36 +146,73 @@ class HeartRateZones:
         return stats
 
     def _zone_distribution(self, df: pd.DataFrame) -> Dict:
-        zone_counts = df['hr_zone'].value_counts()
-        total = len(df)
+        df_with_hr = df[df['avg_hr'].notna()]
+        total_with_hr = len(df_with_hr)
+
         distribution = {}
+
+        if total_with_hr == 0:
+            for zone in self.zones:
+                distribution[zone['name']] = {
+                    'count': 0,
+                    'percentage': 0,
+                    'color': zone['color']
+                }
+            distribution['未知/无心率'] = {
+                'count': len(df),
+                'percentage': 100,
+                'color': '#95a5a6'
+            }
+            return distribution
+
+        zone_counts = df_with_hr['hr_zone'].value_counts()
+
         for zone in self.zones:
             count = int(zone_counts.get(zone['name'], 0))
             distribution[zone['name']] = {
                 'count': count,
-                'percentage': round(count / total * 100, 1) if total > 0 else 0,
+                'percentage': round(count / total_with_hr * 100, 1),
                 'color': zone['color']
             }
-        other_count = total - sum([v['count'] for v in distribution.values()])
-        if other_count > 0:
+
+        no_hr_count = len(df) - total_with_hr
+        if no_hr_count > 0:
             distribution['未知/无心率'] = {
-                'count': other_count,
-                'percentage': round(other_count / total * 100, 1),
+                'count': no_hr_count,
+                'percentage': round(no_hr_count / len(df) * 100, 1),
                 'color': '#95a5a6'
             }
+
         return distribution
 
     def _assess_training_balance(self, df: pd.DataFrame) -> Dict:
         df_with_hr = df[df['avg_hr'].notna()]
+
         if df_with_hr.empty:
             return {
-                'assessment': '暂无足够心率数据',
-                'recommendations': ['建议佩戴心率设备记录训练'],
-                'score': 0
+                'assessment': '暂无心率数据',
+                'recommendations': ['建议佩戴心率设备记录训练，以便分析训练强度分布'],
+                'score': 0,
+                'easy_pct': 0,
+                'moderate_pct': 0,
+                'hard_pct': 0,
+                'has_data': False
+            }
+
+        total = len(df_with_hr)
+
+        if total < 2:
+            return {
+                'assessment': '数据较少',
+                'recommendations': ['继续积累训练数据后再评估训练平衡'],
+                'score': 0,
+                'easy_pct': 0,
+                'moderate_pct': 0,
+                'hard_pct': 0,
+                'has_data': True
             }
 
         zone_counts = df_with_hr['hr_zone'].value_counts()
-        total = len(df_with_hr)
 
         z1_pct = zone_counts.get('Z1 恢复', 0) / total * 100
         z2_pct = zone_counts.get('Z2 有氧', 0) / total * 100
@@ -204,5 +259,49 @@ class HeartRateZones:
             'hard_pct': round(hard_pct, 1),
             'assessment': f'训练平衡评分: {score}/100' if total >= 3 else '数据较少，建议积累更多训练记录',
             'recommendations': recommendations if recommendations else ['训练分布正常'],
-            'score': score
+            'score': score,
+            'has_data': True
         }
+
+    def _analyze_by_sport(self, df: pd.DataFrame) -> Dict:
+        if df.empty:
+            return {}
+
+        sport_names = {
+            'running': '跑步',
+            'cycling': '骑行',
+            'strength': '力量训练',
+            'walking': '步行',
+            'swimming': '游泳',
+            'other': '其他'
+        }
+
+        result = {}
+        for sport in df['sport_type'].unique():
+            sport_df = df[df['sport_type'] == sport]
+            sport_df_with_hr = sport_df[sport_df['avg_hr'].notna()]
+
+            zone_counts = sport_df_with_hr['hr_zone'].value_counts() if len(sport_df_with_hr) > 0 else pd.Series()
+            len_with_hr = len(sport_df_with_hr)
+
+            easy = 0
+            moderate = 0
+            hard = 0
+
+            if len_with_hr > 0:
+                easy = zone_counts.get('Z1 恢复', 0) + zone_counts.get('Z2 有氧', 0)
+                moderate = zone_counts.get('Z3 阈值', 0)
+                hard = zone_counts.get('Z4 无氧', 0) + zone_counts.get('Z5 极限', 0)
+
+            result[sport] = {
+                'name': sport_names.get(sport, sport),
+                'total_count': len(sport_df),
+                'with_hr_count': len_with_hr,
+                'easy_count': easy,
+                'moderate_count': moderate,
+                'hard_count': hard,
+                'avg_hr_avg': round(sport_df_with_hr['avg_hr'].mean(), 1) if len_with_hr > 0 else None,
+                'total_load': round(sport_df['training_load'].sum(), 1) if 'training_load' in sport_df.columns else 0
+            }
+
+        return result
