@@ -95,6 +95,12 @@ if 'goal_analysis' not in st.session_state:
     st.session_state.goal_analysis = {}
 if 'weekly_report' not in st.session_state:
     st.session_state.weekly_report = {}
+if 'raw_csv_df' not in st.session_state:
+    st.session_state.raw_csv_df = pd.DataFrame()
+if 'column_mapping' not in st.session_state:
+    st.session_state.column_mapping = {}
+if 'anomaly_mask' not in st.session_state:
+    st.session_state.anomaly_mask = pd.Series()
 if 'user_config' not in st.session_state:
     st.session_state.user_config = {
         'age': 35,
@@ -118,8 +124,16 @@ SPORT_OPTIONS = {
 def load_data_to_preview(raw_df: pd.DataFrame):
     cleaner = ActivityCleaner()
     preview_df, issues_df = cleaner.clean_data(raw_df)
+    preview_df, outlier_issues = cleaner.detect_outliers_for_preview(preview_df)
+    if outlier_issues:
+        outlier_df = pd.DataFrame(outlier_issues)
+        if not issues_df.empty:
+            issues_df = pd.concat([issues_df, outlier_df], ignore_index=True)
+        else:
+            issues_df = outlier_df
     st.session_state.preview_df = preview_df
     st.session_state.preview_issues = issues_df
+    st.session_state.anomaly_mask = preview_df.get('is_outlier', pd.Series([False] * len(preview_df)))
     st.session_state.stage = 'preview'
 
 
@@ -145,6 +159,17 @@ def run_analysis_pipeline():
 
     clean_df = st.session_state.preview_df.copy()
     issues_df = st.session_state.preview_issues.copy()
+
+    if 'is_outlier' in clean_df.columns:
+        outlier_count = clean_df['is_outlier'].sum()
+        if outlier_count > 0:
+            clean_df = clean_df[~clean_df['is_outlier']].reset_index(drop=True)
+            st.info(f'已排除 {outlier_count} 条异常记录，不纳入分析')
+        clean_df = clean_df.drop(columns=['is_outlier'])
+
+    if clean_df.empty:
+        st.warning('排除异常记录后没有可分析的数据')
+        return
 
     with st.spinner('正在分析配速和训练负荷...'):
         pace_analyzer = _safe_create_analyzer(
@@ -208,22 +233,58 @@ def format_pace(pace_min_km):
 def import_files_from_upload(uploaded_files):
     importer = DataImporter()
     temp_files = []
+    csv_files = []
     for f in uploaded_files:
         suffix = os.path.splitext(f.name)[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(f.getvalue())
             temp_files.append(tmp.name)
+            if suffix.lower() == '.csv':
+                csv_files.append((f.name, tmp.name))
 
     dfs = []
     for tf in temp_files:
-        if tf.lower().endswith('.csv'):
-            batch_df = importer.import_csv_batch(tf)
-            if not batch_df.empty:
-                dfs.append(batch_df)
-        else:
+        if not tf.lower().endswith('.csv'):
             single_df = importer.import_files([tf])
             if not single_df.empty:
                 dfs.append(single_df)
+
+    if csv_files:
+        combined_csv = pd.DataFrame()
+        for fname, tf in csv_files:
+            raw_df = importer.read_csv_raw(tf)
+            if raw_df is not None and not raw_df.empty:
+                raw_df['_source_file'] = fname
+                combined_csv = pd.concat([combined_csv, raw_df], ignore_index=True)
+
+        if not combined_csv.empty:
+            st.session_state.raw_csv_df = combined_csv
+            auto_mapping = importer.auto_detect_mapping(list(combined_csv.columns))
+            st.session_state.column_mapping = auto_mapping
+
+            std_cols = ['date', 'sport_type', 'distance_km', 'duration_min',
+                       'elevation_gain_m', 'avg_hr', 'max_hr', 'avg_pace_min_km',
+                       'calories', 'sleep_hours', 'injury', 'notes']
+            has_all_std = all(col in combined_csv.columns for col in std_cols[:4])
+            if has_all_std and not auto_mapping:
+                mapped_df = importer.apply_column_mapping(combined_csv, {})
+                if dfs:
+                    non_csv = pd.concat(dfs, ignore_index=True)
+                    combined = pd.concat([non_csv, mapped_df], ignore_index=True)
+                else:
+                    combined = mapped_df
+                st.session_state.raw_df = combined
+                for tf in temp_files:
+                    try: os.unlink(tf)
+                    except: pass
+                load_data_to_preview(combined)
+                return True
+            else:
+                st.session_state.stage = 'column_mapping'
+                for tf in temp_files:
+                    try: os.unlink(tf)
+                    except: pass
+                return True
 
     for tf in temp_files:
         try:
@@ -305,17 +366,82 @@ if st.session_state.stage == 'idle':
 2026-06-02 18:30:00,strength,0,45,,120,155,0,280,6.8,,力量训练'''
     st.code(sample_csv, language='csv')
 
+elif st.session_state.stage == 'column_mapping':
+    st.markdown('<p class="section-title">🔗 CSV 列名匹配</p>', unsafe_allow_html=True)
+
+    raw_df = st.session_state.raw_csv_df
+    importer = DataImporter()
+
+    st.info('请将 CSV 文件中的列名与标准字段对应起来。日期为必填项，其他字段可选。系统已自动尝试匹配，您可以手动调整。')
+
+    st.markdown('')
+    st.markdown('#### 📝 数据预览（前5行）')
+    st.dataframe(raw_df.head(), use_container_width=True, hide_index=True)
+
+    st.markdown('')
+    st.markdown('#### 🔄 列名匹配')
+
+    csv_cols = list(raw_df.columns)
+    if '_source_file' in csv_cols:
+        csv_cols.remove('_source_file')
+    csv_options = [''] + csv_cols
+
+    col1, col2 = st.columns(2)
+    new_mapping = {}
+
+    for i, field in enumerate(importer.standard_fields):
+        key = field['key']
+        label = field['label']
+        required = field['required']
+
+        curr_value = st.session_state.column_mapping.get(key, '')
+        if curr_value not in csv_options:
+            curr_value = ''
+
+        with col1 if i % 2 == 0 else col2:
+            label_text = f'{label} {"*" if required else ""}'
+            selected = st.selectbox(
+                label_text,
+                options=csv_options,
+                index=csv_options.index(curr_value) if curr_value in csv_options else 0,
+                key=f'map_{key}'
+            )
+            if selected:
+                new_mapping[key] = selected
+
+    st.markdown('')
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        if st.button('↩️ 重新自动匹配', use_container_width=True):
+            new_mapping = importer.auto_detect_mapping(list(raw_df.columns))
+            st.session_state.column_mapping = new_mapping
+            st.rerun()
+
+    with col_right:
+        if st.button('✅ 确认匹配并继续 →', type='primary', use_container_width=True):
+            if not new_mapping.get('date'):
+                st.error('请至少匹配"日期/开始时间"字段')
+            else:
+                mapped_df = importer.apply_column_mapping(raw_df, new_mapping)
+                st.session_state.raw_df = mapped_df
+                st.session_state.column_mapping = new_mapping
+                load_data_to_preview(mapped_df)
+                st.rerun()
+
 elif st.session_state.stage == 'preview':
     st.markdown('<p class="section-title">👀 数据导入预览</p>', unsafe_allow_html=True)
 
     preview_df = st.session_state.preview_df
     preview_issues = st.session_state.preview_issues
 
-    col1, col2, col3, col4 = st.columns(4)
+    outlier_count = preview_df['is_outlier'].sum() if 'is_outlier' in preview_df.columns else 0
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric('原始记录数', len(st.session_state.raw_df))
     col2.metric('清洗后记录数', len(preview_df))
     col3.metric('运动类型数', preview_df['sport_type'].nunique() if len(preview_df) > 0 else 0)
     col4.metric('发现问题数', len(preview_issues))
+    col5.metric('异常记录数', outlier_count, delta=f'-{outlier_count} 条待处理')
 
     st.markdown('')
     st.markdown('#### 🏷️ 运动类型分布')
@@ -380,6 +506,89 @@ elif st.session_state.stage == 'preview':
             st.session_state.preview_df = preview_df
             st.success('修改已保存！')
 
+    outlier_count = preview_df['is_outlier'].sum() if 'is_outlier' in preview_df.columns else 0
+    if outlier_count > 0:
+        st.markdown('')
+        st.markdown(f'#### ⚠️ 异常值检测（发现 {outlier_count} 条异常记录）')
+        st.caption('以下记录的数值可能存在异常，您可以手动修正或排除这些记录')
+
+        with st.expander('🔍 查看并修正异常值', expanded=True):
+            outlier_df = preview_df[preview_df['is_outlier']].copy()
+            outlier_edit_cols = ['date', 'sport_type', 'distance_km', 'duration_min',
+                                 'avg_hr', 'max_hr', 'avg_pace_min_km', 'notes']
+            outlier_display = outlier_df[outlier_edit_cols].copy()
+
+            outlier_display['sport_type'] = outlier_display['sport_type'].map(
+                lambda x: SPORT_OPTIONS.get(x, x)
+            )
+
+            outlier_issues = preview_issues[preview_issues['issue_type'] == '数值异常']
+            if not outlier_issues.empty:
+                st.markdown('##### ❗ 异常详情')
+                for _, row in outlier_issues.iterrows():
+                    st.warning(f"**{row['date']}** ({SPORT_OPTIONS.get(row['sport_type'], row['sport_type'])}): {row['details']}")
+
+            st.markdown('##### ✏️ 修正异常值')
+            edited_outliers = st.data_editor(
+                outlier_display,
+                use_container_width=True,
+                num_rows='fixed',
+                column_config={
+                    'date': st.column_config.TextColumn('日期', disabled=True),
+                    'sport_type': st.column_config.SelectboxColumn(
+                        '运动类型',
+                        options=list(SPORT_OPTIONS.values()),
+                        required=True
+                    ),
+                    'distance_km': st.column_config.NumberColumn('距离(km)', min_value=0, step=0.1),
+                    'duration_min': st.column_config.NumberColumn('时长(min)', min_value=0, step=1),
+                    'avg_hr': st.column_config.NumberColumn('平均心率', min_value=0, max_value=240, step=1),
+                    'max_hr': st.column_config.NumberColumn('最大心率', min_value=0, max_value=250, step=1),
+                    'avg_pace_min_km': st.column_config.NumberColumn('配速(min/km)', min_value=0, step=0.1),
+                    'notes': st.column_config.TextColumn('备注'),
+                },
+                height=300,
+                hide_index=True
+            )
+
+            col_fix1, col_fix2, col_fix3 = st.columns(3)
+            with col_fix1:
+                if st.button('💾 保存异常值修正', use_container_width=True):
+                    sport_reverse = {v: k for k, v in SPORT_OPTIONS.items()}
+                    edited_outliers['sport_type'] = edited_outliers['sport_type'].map(
+                        lambda x: sport_reverse.get(x, x)
+                    )
+                    for idx in outlier_df.index:
+                        for col in outlier_edit_cols:
+                            if idx in edited_outliers.index:
+                                preview_df.loc[idx, col] = edited_outliers.loc[idx, col]
+                    preview_df.loc[outlier_df.index, 'is_outlier'] = False
+                    preview_df['avg_pace_min_km'] = np.where(
+                        (preview_df['distance_km'] > 0) & (preview_df['duration_min'] > 0),
+                        preview_df['duration_min'] / preview_df['distance_km'],
+                        preview_df.get('avg_pace_min_km')
+                    )
+                    st.session_state.preview_df = preview_df
+                    st.success('修正已保存！已重新检测异常值')
+                    cleaner = ActivityCleaner()
+                    preview_df, new_outlier_issues = cleaner.detect_outliers_for_preview(preview_df)
+                    st.session_state.preview_df = preview_df
+                    st.rerun()
+
+            with col_fix2:
+                if st.button('🚫 排除所有异常记录', use_container_width=True):
+                    preview_df = preview_df[~preview_df['is_outlier']].reset_index(drop=True)
+                    st.session_state.preview_df = preview_df
+                    st.success(f'已排除 {outlier_count} 条异常记录')
+                    st.rerun()
+
+            with col_fix3:
+                if st.button('✅ 保留（已确认无误）', use_container_width=True):
+                    preview_df.loc[outlier_df.index, 'is_outlier'] = False
+                    st.session_state.preview_df = preview_df
+                    st.success('已确认保留这些记录')
+                    st.rerun()
+
     st.markdown('')
     with st.expander('🧹 查看清洗日志', expanded=False):
         if not preview_issues.empty:
@@ -393,6 +602,14 @@ elif st.session_state.stage == 'preview':
     st.markdown('')
     st.markdown('---')
     col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        remaining_outliers = preview_df['is_outlier'].sum() if 'is_outlier' in preview_df.columns else 0
+        if remaining_outliers > 0:
+            st.warning(f'还有 {remaining_outliers} 条异常记录未处理')
+        else:
+            st.success('✅ 所有异常记录已处理')
+
     with col_right:
         if st.button('✅ 确认数据并开始分析 →', type='primary', use_container_width=True):
             run_analysis_pipeline()
@@ -827,7 +1044,7 @@ elif st.session_state.stage == 'analyzed':
                 st.code(text_report, language='text')
 
         st.markdown('')
-        col_export1, col_export2 = st.columns(2)
+        col_export1, col_export2, col_export3 = st.columns(3)
         with col_export1:
             md_content = report.get('markdown_report', '')
             if md_content:
@@ -845,7 +1062,18 @@ elif st.session_state.stage == 'analyzed':
                 st.download_button(
                     '📊 导出全部训练数据 (CSV)',
                     data=csv_data,
-                    file_name=f'训练数据_{datetime.now().strftime("%Y%m%d")}.csv',
+                    file_name=f'训练明细_{datetime.now().strftime("%Y%m%d")}.csv',
+                    mime='text/csv',
+                    use_container_width=True
+                )
+        with col_export3:
+            summary_export = report.get('summary_export', pd.DataFrame())
+            if not summary_export.empty:
+                csv_data = summary_export.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    '📋 导出周报汇总 (CSV)',
+                    data=csv_data,
+                    file_name=f'周报汇总_{datetime.now().strftime("%Y%m%d")}.csv',
                     mime='text/csv',
                     use_container_width=True
                 )
@@ -879,6 +1107,19 @@ elif st.session_state.stage == 'analyzed':
         combo_chart = charts.get('load_recovery_combo')
         if combo_chart:
             st.plotly_chart(combo_chart, use_container_width=True)
+
+        monthly_trend = report.get('monthly_trend', {})
+        if monthly_trend.get('has_data', False):
+            st.markdown('')
+            st.markdown('### 📈 月度训练趋势（近8周）')
+
+            trend_analysis = monthly_trend.get('trend_analysis', '')
+            if trend_analysis:
+                st.info(f'**趋势分析**: {trend_analysis}')
+
+            monthly_chart = charts.get('monthly_trend')
+            if monthly_chart:
+                st.plotly_chart(monthly_chart, use_container_width=True)
 
         recovery_combo = report.get('recovery_combo', {})
         if recovery_combo:

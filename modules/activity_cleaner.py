@@ -445,6 +445,98 @@ class ActivityCleaner:
         df = df.drop(index=to_drop).reset_index(drop=True)
         return df, issues
 
+    def detect_outliers_for_preview(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, List[dict]]:
+        issues = []
+        df = df.copy()
+        outlier_mask = pd.Series([False] * len(df), index=df.index)
+
+        for idx, row in df.iterrows():
+            sport = row.get('sport_type', 'running')
+            distance = row.get('distance_km', 0) or 0
+            duration = row.get('duration_min', 0) or 0
+            avg_hr = row.get('avg_hr')
+            max_hr = row.get('max_hr')
+            pace = row.get('avg_pace_min_km')
+
+            if pd.isna(distance):
+                distance = 0
+            if pd.isna(duration):
+                duration = 0
+
+            thresholds = self.reasonable_thresholds.get(sport, {})
+            row_issues = []
+
+            if sport in ['running', 'cycling', 'walking']:
+                max_dist = thresholds.get('max_distance_single', 100)
+                if distance > max_dist:
+                    row_issues.append(f'距离过长 ({distance:.1f}km > {max_dist}km)')
+                if distance > 0 and distance < thresholds.get('min_distance_km', 0.05):
+                    row_issues.append(f'距离过短 ({distance:.3f}km)')
+
+                max_dur = thresholds.get('max_duration_single', 720)
+                if duration > max_dur:
+                    row_issues.append(f'时长过长 ({duration:.0f}min > {max_dur}min)')
+
+                speed = (distance / (duration / 60)) if duration > 0 else 0
+                speed_range = thresholds.get('typical_speed_kmh', (5, 25))
+                if distance > 0 and duration > 0:
+                    if speed < speed_range[0] * 0.5:
+                        row_issues.append(f'速度过低 ({speed:.1f}km/h)')
+                    elif speed > speed_range[1] * 1.5:
+                        row_issues.append(f'速度过高 ({speed:.1f}km/h)')
+
+                if pace and not pd.isna(pace):
+                    min_pace = thresholds.get('min_pace', 2.5)
+                    max_pace = thresholds.get('max_pace', 15)
+                    if pace < min_pace:
+                        row_issues.append(f'配速过快 ({pace:.2f}min/km < {min_pace})')
+                    elif pace > max_pace:
+                        row_issues.append(f'配速过慢 ({pace:.2f}min/km > {max_pace})')
+
+            elif sport == 'strength':
+                max_dur = thresholds.get('max_duration', 240)
+                if duration > max_dur:
+                    row_issues.append(f'力量训练时长过长 ({duration:.0f}min > {max_dur}min)')
+                if duration > 0 and duration < thresholds.get('min_duration', 2):
+                    row_issues.append(f'力量训练时长过短 ({duration:.1f}min)')
+
+            if avg_hr and not pd.isna(avg_hr):
+                if avg_hr < 40:
+                    row_issues.append(f'平均心率过低 ({avg_hr:.0f}bpm < 40)')
+                elif avg_hr > 220:
+                    row_issues.append(f'平均心率过高 ({avg_hr:.0f}bpm > 220)')
+
+            if max_hr and not pd.isna(max_hr):
+                if max_hr < 40:
+                    row_issues.append(f'最大心率过低 ({max_hr:.0f}bpm < 40)')
+                elif max_hr > 240:
+                    row_issues.append(f'最大心率过高 ({max_hr:.0f}bpm > 240)')
+
+            if avg_hr and max_hr and not pd.isna(avg_hr) and not pd.isna(max_hr):
+                if avg_hr > max_hr:
+                    row_issues.append('平均心率 > 最大心率')
+
+            if row_issues:
+                outlier_mask.iloc[idx] = True
+                issues.append({
+                    'row_index': idx,
+                    'date': row.get('date', ''),
+                    'sport_type': sport,
+                    'issue_type': '数值异常',
+                    'severity': 'warning',
+                    'details': '；'.join(row_issues),
+                    'fields': {
+                        'distance_km': distance,
+                        'duration_min': duration,
+                        'avg_hr': avg_hr,
+                        'max_hr': max_hr,
+                        'avg_pace_min_km': pace
+                    }
+                })
+
+        df['is_outlier'] = outlier_mask.values
+        return df, issues
+
     def _ensure_fields(self, df: pd.DataFrame) -> pd.DataFrame:
         required_fields = [
             'date', 'date_parsed', 'sport_type', 'sport_confidence',

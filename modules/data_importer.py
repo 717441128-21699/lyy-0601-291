@@ -21,6 +21,35 @@ class DataImporter:
     def __init__(self):
         self.supported_formats = ['.gpx', '.tcx', '.csv', '.fit', '.json']
 
+        self.standard_fields = [
+            {'key': 'date', 'label': '日期/开始时间', 'required': True,
+             'aliases': ['date', 'Date', 'timestamp', 'Timestamp', 'start_time', 'StartTime', '开始时间', '日期', '时间', '运动时间', '训练时间', '运动日期']},
+            {'key': 'sport_type', 'label': '运动类型', 'required': False,
+             'aliases': ['sport_type', 'type', 'sport', 'Sport', 'Type', 'activity_type', 'Activity', '运动类型', '类型', '项目']},
+            {'key': 'distance_km', 'label': '距离(km)', 'required': False,
+             'aliases': ['distance_km', 'distance', 'Distance', '距离', '里程', '总距离', '总距离(km)', '距离(公里)', '跑步距离', '运动距离']},
+            {'key': 'duration_min', 'label': '时长(min)', 'required': False,
+             'aliases': ['duration_min', 'duration', 'Duration', '时长', '时间', '分钟', '持续时间', '持续时间(分)', '时长(分钟)', '总时长', '运动时长', '训练时长']},
+            {'key': 'elevation_gain_m', 'label': '爬升(m)', 'required': False,
+             'aliases': ['elevation_gain_m', 'elevation', 'Elevation', 'climb', 'Climb', '爬升', '海拔提升', '上升', '爬升(m)', '总爬升', '海拔']},
+            {'key': 'avg_hr', 'label': '平均心率', 'required': False,
+             'aliases': ['avg_hr', 'average_hr', 'Avg HR', 'mean_hr', '平均心率', '心率', '平均心率(bpm)']},
+            {'key': 'max_hr', 'label': '最大心率', 'required': False,
+             'aliases': ['max_hr', 'Max HR', 'max_heart_rate', '最大心率', '最高心率', '最大心率(bpm)', '峰值心率']},
+            {'key': 'avg_pace_min_km', 'label': '平均配速(min/km)', 'required': False,
+             'aliases': ['avg_pace_min_km', 'pace', 'Pace', '配速', '平均配速', '配速(min/km)', '平均配速(min/km)']},
+            {'key': 'calories', 'label': '卡路里', 'required': False,
+             'aliases': ['calories', 'Calories', '卡路里', '消耗', '热量', '消耗卡路里', '消耗热量', '卡路里(kcal)']},
+            {'key': 'sleep_hours', 'label': '睡眠(h)', 'required': False,
+             'aliases': ['sleep_hours', 'sleep', 'Sleep', '睡眠', '睡眠时间', '睡眠时长', '睡眠(h)', '睡眠(小时)']},
+            {'key': 'injury', 'label': '伤痛', 'required': False,
+             'aliases': ['injury', 'pain', 'Injury', '伤痛', '受伤', '疼痛', '伤痛情况', '是否受伤']},
+            {'key': 'notes', 'label': '备注', 'required': False,
+             'aliases': ['notes', 'Notes', 'comment', 'Comment', '备注', '说明', '描述']},
+        ]
+
+        self.field_labels = {f['key']: f['label'] for f in self.standard_fields}
+
     def import_files(self, file_paths: List[str]) -> pd.DataFrame:
         activities = []
         for file_path in file_paths:
@@ -272,6 +301,47 @@ class DataImporter:
             print(f"CSV解析错误: {e}")
             return None
         return None
+
+    def read_csv_raw(self, file_path: str) -> Optional[pd.DataFrame]:
+        try:
+            return pd.read_csv(file_path)
+        except Exception as e:
+            print(f"CSV读取错误: {e}")
+            return None
+
+    def auto_detect_mapping(self, df_columns: List[str]) -> Dict[str, str]:
+        mapping = {}
+        for field in self.standard_fields:
+            for alias in field['aliases']:
+                if alias in df_columns:
+                    mapping[field['key']] = alias
+                    break
+        return mapping
+
+    def apply_column_mapping(self, df: pd.DataFrame, column_mapping: Dict[str, str]) -> pd.DataFrame:
+        if df.empty:
+            return df
+
+        result = df.copy()
+
+        for std_key, src_col in column_mapping.items():
+            if src_col and src_col in result.columns:
+                if std_key != src_col:
+                    if std_key in result.columns and std_key != src_col:
+                        result = result.drop(columns=[std_key])
+                    result = result.rename(columns={src_col: std_key})
+
+        for field in self.standard_fields:
+            key = field['key']
+            if key not in result.columns:
+                if key in ['date', 'sport_type', 'notes']:
+                    result[key] = ''
+                elif key == 'injury':
+                    result[key] = ''
+                else:
+                    result[key] = None
+
+        return result
 
     def _parse_fit(self, file_path: str) -> Optional[Dict[str, Any]]:
         if not FitFile:

@@ -38,6 +38,8 @@ class WeeklyReport:
                 'markdown_report': '',
                 'recovery_combo': {},
                 'export_data': pd.DataFrame(),
+                'summary_export': pd.DataFrame(),
+                'monthly_trend': {},
                 'has_data': False
             }
 
@@ -53,11 +55,17 @@ class WeeklyReport:
 
         week_summary = self._calculate_week_summary(this_week_df, last_week_df)
         anomalies = self._detect_anomalies(df, this_week_df)
-        charts = self._generate_charts(this_week_df, df)
-        text_report = self._generate_text_report(week_summary, anomalies)
-        markdown_report = self._generate_markdown_report(week_summary, anomalies, recovery_analysis, goal_analysis)
         recovery_combo = self._generate_recovery_combo(this_week_df, df, recovery_analysis, anomalies)
-        export_data = self._prepare_export_data(df, this_week_df, week_summary)
+        monthly_trend = self._analyze_monthly_trend(df)
+        charts = self._generate_charts(this_week_df, df, monthly_trend)
+        text_report = self._generate_text_report(week_summary, anomalies)
+        markdown_report = self._generate_markdown_report(
+            week_summary, anomalies, recovery_analysis, goal_analysis,
+            recovery_combo, monthly_trend
+        )
+        export_data, summary_export = self._prepare_export_data(
+            df, this_week_df, week_summary, recovery_combo, anomalies, monthly_trend
+        )
 
         return {
             'week_period': f'{week_start.strftime("%Y-%m-%d")} ~ {today.strftime("%Y-%m-%d")}',
@@ -67,7 +75,9 @@ class WeeklyReport:
             'text_report': text_report,
             'markdown_report': markdown_report,
             'recovery_combo': recovery_combo,
+            'monthly_trend': monthly_trend,
             'export_data': export_data,
+            'summary_export': summary_export,
             'has_data': True
         }
 
@@ -318,7 +328,8 @@ class WeeklyReport:
             'severity': severity
         }
 
-    def _generate_charts(self, this_week: pd.DataFrame, all_df: pd.DataFrame) -> Dict:
+    def _generate_charts(self, this_week: pd.DataFrame, all_df: pd.DataFrame,
+                         monthly_trend: Optional[Dict] = None) -> Dict:
         charts = {}
 
         charts['daily_distance'] = self._chart_daily_distance(this_week)
@@ -327,6 +338,8 @@ class WeeklyReport:
         charts['pace_hr_scatter'] = self._chart_pace_hr_scatter(this_week)
         charts['training_load'] = self._chart_training_load(all_df)
         charts['load_recovery_combo'] = self._chart_load_recovery_combo(all_df)
+        if monthly_trend and monthly_trend.get('has_data'):
+            charts['monthly_trend'] = self._chart_monthly_trend(monthly_trend)
 
         return charts
 
@@ -595,6 +608,124 @@ class WeeklyReport:
 
         return fig
 
+    def _chart_monthly_trend(self, monthly_trend: Dict) -> go.Figure:
+        weekly_data = monthly_trend.get('weekly_data', [])
+        if not weekly_data:
+            fig = go.Figure()
+            fig.update_layout(
+                title='月度训练趋势（暂无数据）',
+                height=500,
+                template='plotly_white'
+            )
+            return fig
+
+        week_labels = [w['week_label'] for w in weekly_data]
+        load_values = [w['total_load'] for w in weekly_data]
+        duration_values = [w['total_duration_h'] for w in weekly_data]
+        sleep_values = [w['avg_sleep_h'] if w['avg_sleep_h'] is not None else 0 for w in weekly_data]
+        injury_markers = [w['has_injury'] for w in weekly_data]
+
+        fig = make_subplots(
+            rows=3, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            subplot_titles=(
+                '周训练负荷趋势',
+                '周训练时长趋势',
+                '周平均睡眠与伤痛标记'
+            ),
+            row_heights=[0.4, 0.3, 0.3]
+        )
+
+        load_colors = []
+        for i, load in enumerate(load_values):
+            if i == 0:
+                load_colors.append('#3498db')
+            elif load > load_values[i - 1] * 1.2:
+                load_colors.append('#e74c3c')
+            elif load < load_values[i - 1] * 0.8:
+                load_colors.append('#f39c12')
+            else:
+                load_colors.append('#3498db')
+
+        fig.add_trace(go.Bar(
+            x=week_labels,
+            y=load_values,
+            name='周总负荷',
+            marker_color=load_colors,
+            text=[f'{v:.0f}' for v in load_values],
+            textposition='outside'
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=week_labels,
+            y=duration_values,
+            name='训练时长(小时)',
+            mode='lines+markers',
+            line=dict(color='#9b59b6', width=2),
+            marker=dict(size=8),
+            text=[f'{v:.1f}h' for v in duration_values],
+            textposition='top center'
+        ), row=2, col=1)
+
+        sleep_plot_x = []
+        sleep_plot_y = []
+        sleep_colors = []
+        for i, (label, sleep, has_injury) in enumerate(zip(week_labels, sleep_values, injury_markers)):
+            if sleep > 0:
+                sleep_plot_x.append(label)
+                sleep_plot_y.append(sleep)
+                if has_injury:
+                    sleep_colors.append('#e74c3c')
+                elif sleep < 6.5:
+                    sleep_colors.append('#f39c12')
+                else:
+                    sleep_colors.append('#2ecc71')
+
+        if sleep_plot_x:
+            fig.add_trace(go.Scatter(
+                x=sleep_plot_x,
+                y=sleep_plot_y,
+                name='平均睡眠(小时)',
+                mode='lines+markers',
+                line=dict(color='#2ecc71', width=2),
+                marker=dict(size=10, color=sleep_colors,
+                           line=dict(color='#000', width=1)),
+                text=[f'{v:.1f}h {"⚠️伤痛" if m else ""}' for v, m in zip(sleep_plot_y, injury_markers)]
+            ), row=3, col=1)
+
+            fig.add_hline(
+                y=7.5,
+                line_dash="dash",
+                line_color="#f1c40f",
+                annotation_text="推荐睡眠",
+                row=3, col=1
+            )
+
+        for i, (label, has_injury) in enumerate(zip(week_labels, injury_markers)):
+            if has_injury:
+                fig.add_annotation(
+                    x=label,
+                    y=1.05,
+                    text="⚠️",
+                    showarrow=False,
+                    font=dict(size=14),
+                    xref="x",
+                    yref="paper"
+                )
+
+        fig.update_layout(
+            title='近8周训练负荷、睡眠与恢复趋势',
+            height=700,
+            template='plotly_white',
+            legend=dict(orientation='h', yanchor='bottom', y=1.02)
+        )
+        fig.update_yaxes(title_text='训练负荷', row=1, col=1)
+        fig.update_yaxes(title_text='时长(h)', row=2, col=1)
+        fig.update_yaxes(title_text='睡眠(h)', row=3, col=1, range=[0, 12])
+
+        return fig
+
     def _generate_recovery_combo(self, this_week: pd.DataFrame, all_df: pd.DataFrame,
                                   recovery_analysis: Optional[Dict], anomalies: Dict) -> Dict:
         all_issues = []
@@ -652,6 +783,107 @@ class WeeklyReport:
             'recovery_level': recovery_level,
             'total_load_7d': total_load,
             'issue_count': len(all_issues)
+        }
+
+    def _analyze_monthly_trend(self, df: pd.DataFrame, weeks: int = 8) -> Dict:
+        if df.empty:
+            return {'has_data': False, 'weeks': [], 'weekly_data': [], 'trend_analysis': '', 'trend_direction': '', 'trend_text': ''}
+
+        df = df.copy()
+        df = df.sort_values('date_parsed')
+
+        today = df['date_parsed'].max().to_pydatetime()
+        weekly_data = []
+
+        for i in range(weeks - 1, -1, -1):
+            week_end = today - timedelta(days=i * 7)
+            week_start = week_end - timedelta(days=6)
+            week_label = f'{week_start.strftime("%m/%d")}-{week_end.strftime("%m/%d")}'
+
+            week_df = df[
+                (df['date_parsed'] >= week_start) &
+                (df['date_parsed'] <= week_end)
+            ].copy()
+
+            total_load = week_df['training_load'].sum() if 'training_load' in week_df.columns else 0
+            total_duration_min = week_df['duration_min'].sum() if 'duration_min' in week_df.columns else 0
+            total_duration_h = total_duration_min / 60
+            avg_sleep = None
+            if 'sleep_hours' in week_df.columns and week_df['sleep_hours'].notna().any():
+                avg_sleep = week_df['sleep_hours'].mean()
+
+            has_injury = False
+            if 'is_injured' in week_df.columns:
+                has_injury = week_df['is_injured'].sum() > 0
+            elif 'injury' in week_df.columns:
+                has_injury = week_df['injury'].notna().any()
+
+            weekly_data.append({
+                'week_label': week_label,
+                'week_start': week_start,
+                'week_end': week_end,
+                'total_load': round(total_load, 1),
+                'total_duration_h': round(total_duration_h, 2),
+                'total_duration_min': round(total_duration_min, 1),
+                'avg_sleep_h': round(avg_sleep, 1) if avg_sleep is not None else None,
+                'avg_sleep': round(avg_sleep, 1) if avg_sleep is not None else None,
+                'has_injury': has_injury,
+                'activity_count': len(week_df)
+            })
+
+        load_values = [w['total_load'] for w in weekly_data]
+        duration_values = [w['total_duration_h'] for w in weekly_data]
+        sleep_values = [w['avg_sleep_h'] for w in weekly_data if w['avg_sleep_h'] is not None]
+
+        trend_analysis_parts = []
+
+        trend_direction = 'stable'
+
+        if len(load_values) >= 2:
+            recent_avg = sum(load_values[-2:]) / 2 if load_values[-2:] else 0
+            earlier_avg = sum(load_values[:-2]) / max(len(load_values[:-2]), 1) if load_values[:-2] else 0
+
+            if earlier_avg > 0:
+                change_pct = (recent_avg - earlier_avg) / earlier_avg * 100
+                if change_pct > 20:
+                    trend_direction = 'increasing'
+                    trend_analysis_parts.append(f'近期训练负荷明显增加（+{change_pct:.0f}%），注意循序渐进避免过度训练')
+                elif change_pct < -20:
+                    trend_direction = 'decreasing'
+                    trend_analysis_parts.append(f'近期训练负荷明显减少（{change_pct:.0f}%），可能处于恢复期或减量期')
+                else:
+                    trend_direction = 'stable'
+                    trend_analysis_parts.append('训练负荷保持稳定，训练持续性良好')
+            else:
+                trend_analysis_parts.append('训练负荷趋势良好，持续进步中')
+
+        if sleep_values:
+            avg_sleep_all = sum(sleep_values) / len(sleep_values)
+            if avg_sleep_all < 6.5:
+                trend_analysis_parts.append(f'近{len(sleep_values)}周平均睡眠{avg_sleep_all:.1f}小时，睡眠不足可能影响恢复')
+            elif avg_sleep_all >= 7.5:
+                trend_analysis_parts.append(f'近{len(sleep_values)}周平均睡眠{avg_sleep_all:.1f}小时，睡眠充足恢复良好')
+
+        injury_weeks = [w for w in weekly_data if w['has_injury']]
+        if injury_weeks:
+            injury_labels = ', '.join([w['week_label'] for w in injury_weeks])
+            trend_analysis_parts.append(f'注意：{injury_labels} 有伤痛记录，建议关注恢复情况')
+
+        if not trend_analysis_parts:
+            trend_analysis_parts.append('训练趋势稳定，继续保持')
+
+        trend_text = '；'.join(trend_analysis_parts)
+
+        return {
+            'has_data': True,
+            'weekly_data': weekly_data,
+            'weeks': weekly_data,
+            'trend_analysis': trend_text,
+            'trend_text': trend_text,
+            'trend_direction': trend_direction,
+            'load_values': load_values,
+            'duration_values': duration_values,
+            'sleep_values': sleep_values
         }
 
     def _generate_text_report(self, summary: Dict, anomalies: Dict) -> str:
@@ -713,13 +945,24 @@ class WeeklyReport:
 
     def _generate_markdown_report(self, summary: Dict, anomalies: Dict,
                                    recovery_analysis: Optional[Dict],
-                                   goal_analysis: Optional[Dict]) -> str:
+                                   goal_analysis: Optional[Dict],
+                                   recovery_combo: Optional[Dict] = None,
+                                   monthly_trend: Optional[Dict] = None) -> str:
         this_week = summary.get('this_week', {})
         comparison = summary.get('comparison', {})
 
         md_lines = []
         md_lines.append('# 📋 训练周报\n')
         md_lines.append(f'**周期**: {summary.get("week_period", "本周")}\n')
+
+        if recovery_combo:
+            md_lines.append('## 🎯 核心指标速览\n')
+            md_lines.append('| 指标 | 数值 | 说明 |')
+            md_lines.append('|------|------|------|')
+            md_lines.append(f'| 恢复评分 | {recovery_combo.get("recovery_score", 0)}/100 | {recovery_combo.get("recovery_level", "未知")} |')
+            md_lines.append(f'| 7天总负荷 | {recovery_combo.get("total_load_7d", 0):.0f} | 含所有运动类型 |')
+            md_lines.append(f'| 发现问题 | {recovery_combo.get("issue_count", 0)} 项 | 需要关注 |')
+            md_lines.append('')
 
         md_lines.append('## 📊 数据概览\n')
         md_lines.append('| 指标 | 本周 | 上周 | 变化 |')
@@ -760,56 +1003,99 @@ class WeeklyReport:
         else:
             md_lines.append('暂无运动数据')
 
-        if recovery_analysis:
-            md_lines.append('\n## 💪 恢复状态\n')
-            recovery = recovery_analysis.get('recovery_analysis', {})
-            score = recovery.get('recovery_score', 0)
-            level = recovery.get('recovery_level', '')
-            md_lines.append(f'- **恢复评分**: {score}/100 ({level})')
-            details = recovery.get('recovery_details', [])
-            for d in details:
-                md_lines.append(f'  - {d}')
+        if recovery_combo:
+            issues = recovery_combo.get('issues', [])
+            if issues:
+                md_lines.append('\n## ⚠️ 问题汇总\n')
+                for i, issue in enumerate(issues, 1):
+                    md_lines.append(f'{i}. {issue}')
 
-            overtraining = recovery_analysis.get('overtraining_risk', {})
-            risk_level = overtraining.get('risk_level', '')
-            md_lines.append(f'- **过度训练风险**: {risk_level}')
+            md_lines.append('\n## 💪 恢复状态详情\n')
+            if recovery_analysis:
+                recovery = recovery_analysis.get('recovery_analysis', {})
+                score = recovery.get('recovery_score', 0)
+                level = recovery.get('recovery_level', '')
+                md_lines.append(f'- **恢复评分**: {score}/100 ({level})')
+                details = recovery.get('recovery_details', [])
+                for d in details:
+                    md_lines.append(f'  - {d}')
+
+                overtraining = recovery_analysis.get('overtraining_risk', {})
+                risk_level = overtraining.get('risk_level', '')
+                md_lines.append(f'- **过度训练风险**: {risk_level}')
+                indicators = overtraining.get('indicators', [])
+                for ind in indicators:
+                    if '各项指标正常' not in ind:
+                        md_lines.append(f'  - {ind}')
+
+                rest_days = recovery_analysis.get('rest_day_analysis', {})
+                consec_running = rest_days.get('consecutive_days_running', 0)
+                consec_any = rest_days.get('consecutive_days_any', 0)
+                md_lines.append(f'- **连续运动天数**: 跑步 {consec_running} 天 / 全部运动 {consec_any} 天')
+
+                sleep_stats = recovery_analysis.get('recovery_analysis', {})
+                avg_sleep = sleep_stats.get('avg_sleep_h', None)
+                if avg_sleep is not None:
+                    md_lines.append(f'- **平均睡眠**: {avg_sleep:.1f} 小时/晚')
+
+            anomaly_issues = []
+            for cat, data in anomalies.items():
+                if isinstance(data, dict) and data.get('has_issue'):
+                    anomaly_issues.extend(data.get('issues', []))
+
+            if anomaly_issues:
+                md_lines.append('\n### 🚨 异常检测')
+                for issue in anomaly_issues:
+                    md_lines.append(f'- {issue}')
+
+            recs = recovery_combo.get('recommendations', [])
+            if recs:
+                md_lines.append('\n## 💡 综合建议\n')
+                for i, rec in enumerate(recs, 1):
+                    md_lines.append(f'{i}. {rec}')
+
+        if monthly_trend and monthly_trend.get('has_data', False):
+            md_lines.append('\n## 📈 月度趋势（近8周）\n')
+            weeks = monthly_trend.get('weekly_data', [])
+            if weeks:
+                md_lines.append('| 周次 | 总负荷 | 训练时长 | 平均睡眠 | 伤痛标记 |')
+                md_lines.append('|------|--------|----------|----------|----------|')
+                for wk in weeks:
+                    week_label = wk.get('week_label', '')
+                    load = wk.get('total_load', 0)
+                    dur = wk.get('total_duration_h', 0)
+                    sleep = wk.get('avg_sleep_h', '-')
+                    injury = '⚠️ 有' if wk.get('has_injury', False) else '无'
+                    sleep_str = f'{sleep:.1f}h' if isinstance(sleep, (int, float)) else sleep
+                    md_lines.append(f'| {week_label} | {load:.0f} | {dur:.1f}h | {sleep_str} | {injury} |')
+
+            trend_analysis = monthly_trend.get('trend_analysis', '')
+            if trend_analysis:
+                md_lines.append(f'\n**趋势分析**: {trend_analysis}')
 
         if goal_analysis and goal_analysis.get('has_running_data', True):
             md_lines.append('\n## 🎯 目标进度\n')
             weekly = goal_analysis.get('weekly_goal', {})
             monthly = goal_analysis.get('monthly_goal', {})
+            yearly = goal_analysis.get('yearly_goal', {})
             if weekly:
-                md_lines.append(f'- **周目标**: {weekly.get("distance_so_far_km", 0):.1f} / {weekly.get("goal_km", 0):.1f} km ({weekly.get("progress_pct", 0):.1f}%)')
+                md_lines.append(f'- **周跑量目标**: {weekly.get("distance_so_far_km", 0):.1f} / {weekly.get("goal_km", 0):.1f} km ({weekly.get("progress_pct", 0):.1f}%)')
             if monthly:
-                md_lines.append(f'- **月目标**: {monthly.get("distance_so_far_km", 0):.1f} / {monthly.get("goal_km", 0):.1f} km ({monthly.get("progress_pct", 0):.1f}%)')
-
-        md_lines.append('\n## ⚠️ 异常与提醒\n')
-        anomaly_issues = []
-        for cat, data in anomalies.items():
-            if isinstance(data, dict) and data.get('has_issue'):
-                anomaly_issues.extend(data.get('issues', []))
-
-        if anomaly_issues:
-            for issue in anomaly_issues:
-                md_lines.append(f'- {issue}')
-        else:
-            md_lines.append('- 无异常提醒，训练状态良好 ✅')
-
-        combo = summary.get('recovery_combo', {})
-        recs = combo.get('recommendations', [])
-        if recs:
-            md_lines.append('\n## 💡 训练建议\n')
-            for rec in recs:
-                md_lines.append(f'- {rec}')
+                md_lines.append(f'- **月跑量目标**: {monthly.get("distance_so_far_km", 0):.1f} / {monthly.get("goal_km", 0):.1f} km ({monthly.get("progress_pct", 0):.1f}%)')
+            if yearly:
+                md_lines.append(f'- **年跑量目标**: {yearly.get("distance_so_far_km", 0):.1f} / {yearly.get("goal_km", 0):.1f} km ({yearly.get("progress_pct", 0):.1f}%)')
 
         md_lines.append('\n---')
         md_lines.append(f'*报告生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}*')
 
         return '\n'.join(md_lines)
 
-    def _prepare_export_data(self, all_df: pd.DataFrame, this_week: pd.DataFrame, summary: Dict) -> pd.DataFrame:
+    def _prepare_export_data(self, all_df: pd.DataFrame, this_week: pd.DataFrame,
+                             summary: Dict, recovery_combo: Optional[Dict] = None,
+                             anomalies: Optional[Dict] = None,
+                             monthly_trend: Optional[Dict] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
         if all_df.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame()
 
         export_cols = [
             'date', 'sport_type', 'distance_km', 'duration_min',
@@ -822,13 +1108,91 @@ class WeeklyReport:
         available_cols = [c for c in export_cols if c in all_df.columns]
         df_export = all_df[available_cols].copy()
 
-        sport_map = {v: k for k, v in self.sport_names.items()}
         if 'sport_type' in df_export.columns:
             df_export['sport_type'] = df_export['sport_type'].map(
                 lambda x: self.sport_names.get(x, x)
             )
 
-        return df_export
+        summary_rows = []
+        week_period = summary.get('week_period', '本周')
+        this_week_stats = summary.get('this_week', {})
+        last_week_stats = summary.get('last_week', {})
+
+        summary_rows.append({'section': '=== 周报核心指标 ===', 'item': '', 'value': '', 'notes': ''})
+        summary_rows.append({'section': '报告周期', 'item': week_period, 'value': '', 'notes': ''})
+
+        if recovery_combo:
+            summary_rows.append({'section': '恢复评分', 'item': f"{recovery_combo.get('recovery_score', 0)}/100", 'value': '', 'notes': recovery_combo.get('recovery_level', '')})
+            summary_rows.append({'section': '7天总负荷', 'item': f"{recovery_combo.get('total_load_7d', 0):.0f}", 'value': '', 'notes': '含所有运动类型'})
+            summary_rows.append({'section': '发现问题数', 'item': f"{recovery_combo.get('issue_count', 0)}", 'value': '', 'notes': '需要关注'})
+
+        summary_rows.append({'section': '=== 本周数据概览 ===', 'item': '', 'value': '', 'notes': ''})
+        summary_rows.append({'section': '总活动次数', 'item': f"{this_week_stats.get('total_activities', 0)}", 'value': f"{last_week_stats.get('total_activities', 0)}", 'notes': '上周值'})
+        summary_rows.append({'section': '总训练时长(小时)', 'item': f"{this_week_stats.get('total_duration_h', 0):.1f}", 'value': f"{last_week_stats.get('total_duration_h', 0):.1f}", 'notes': '上周值'})
+        summary_rows.append({'section': '总训练距离(km)', 'item': f"{this_week_stats.get('total_distance_km', 0):.1f}", 'value': f"{last_week_stats.get('total_distance_km', 0):.1f}", 'notes': '上周值'})
+        summary_rows.append({'section': '总训练负荷', 'item': f"{this_week_stats.get('total_training_load', 0):.0f}", 'value': f"{last_week_stats.get('total_training_load', 0):.0f}", 'notes': '上周值'})
+
+        by_sport = this_week_stats.get('by_sport', {})
+        if by_sport:
+            summary_rows.append({'section': '=== 运动类型明细 ===', 'item': '', 'value': '', 'notes': ''})
+            for sport_key, sport_data in by_sport.items():
+                name = sport_data.get('name', sport_key)
+                count = sport_data.get('count', 0)
+                dist = sport_data.get('distance_km', 0)
+                dur = sport_data.get('duration_h', 0)
+                load = sport_data.get('load', 0)
+                summary_rows.append({
+                    'section': name,
+                    'item': f"{count}次",
+                    'value': f"{dist:.1f}km / {dur:.1f}h",
+                    'notes': f"负荷{load:.0f}"
+                })
+
+        if recovery_combo:
+            issues = recovery_combo.get('issues', [])
+            if issues:
+                summary_rows.append({'section': '=== 问题汇总 ===', 'item': '', 'value': '', 'notes': ''})
+                for i, issue in enumerate(issues, 1):
+                    summary_rows.append({'section': f'问题{i}', 'item': issue, 'value': '', 'notes': ''})
+
+            recs = recovery_combo.get('recommendations', [])
+            if recs:
+                summary_rows.append({'section': '=== 综合建议 ===', 'item': '', 'value': '', 'notes': ''})
+                for i, rec in enumerate(recs, 1):
+                    summary_rows.append({'section': f'建议{i}', 'item': rec, 'value': '', 'notes': ''})
+
+        if anomalies:
+            anomaly_issues = []
+            for cat, data in anomalies.items():
+                if isinstance(data, dict) and data.get('has_issue'):
+                    anomaly_issues.extend(data.get('issues', []))
+            if anomaly_issues:
+                summary_rows.append({'section': '=== 异常检测 ===', 'item': '', 'value': '', 'notes': ''})
+                for i, issue in enumerate(anomaly_issues, 1):
+                    summary_rows.append({'section': f'异常{i}', 'item': issue, 'value': '', 'notes': ''})
+
+        if monthly_trend and monthly_trend.get('has_data'):
+            weekly_data = monthly_trend.get('weekly_data', [])
+            if weekly_data:
+                summary_rows.append({'section': '=== 近8周趋势 ===', 'item': '', 'value': '', 'notes': ''})
+                for wk in weekly_data:
+                    injury_flag = ' ⚠️伤痛' if wk.get('has_injury', False) else ''
+                    sleep_str = f"{wk.get('avg_sleep_h', 0):.1f}h" if wk.get('avg_sleep_h') else '无睡眠'
+                    summary_rows.append({
+                        'section': wk.get('week_label', ''),
+                        'item': f"负荷{wk.get('total_load', 0):.0f}",
+                        'value': f"{wk.get('total_duration_h', 0):.1f}h",
+                        'notes': f"{sleep_str}{injury_flag}"
+                    })
+            trend_analysis = monthly_trend.get('trend_analysis', '')
+            if trend_analysis:
+                summary_rows.append({'section': '趋势分析', 'item': trend_analysis, 'value': '', 'notes': ''})
+
+        summary_rows.append({'section': f'报告生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 'item': '', 'value': '', 'notes': ''})
+
+        df_summary = pd.DataFrame(summary_rows)
+
+        return df_export, df_summary
 
     def export_csv(self, export_data: pd.DataFrame) -> str:
         if export_data.empty:

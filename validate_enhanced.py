@@ -306,6 +306,183 @@ def test_export_functions():
     
     return report
 
+def test_outlier_detection():
+    """测试异常值检测与修正"""
+    print("\n" + "=" * 60)
+    print("测试 7: 异常值检测与修正")
+    print("=" * 60)
+
+    gen = SampleDataGenerator(seed=42)
+    raw_df = gen.generate(days=30)
+
+    outlier_data = [
+        {
+            'date': '2026-06-15 07:00:00',
+            'sport_type': 'running',
+            'distance_km': 200,
+            'duration_min': 60,
+            'avg_hr': 150,
+            'max_hr': 165,
+            'elevation_gain_m': 50,
+            'calories': 500,
+            'sleep_hours': 7,
+            'injury': None,
+            'notes': '异常距离测试'
+        },
+        {
+            'date': '2026-06-16 18:00:00',
+            'sport_type': 'running',
+            'distance_km': 5,
+            'duration_min': 30,
+            'avg_hr': 280,
+            'max_hr': 300,
+            'elevation_gain_m': 30,
+            'calories': 400,
+            'sleep_hours': 6.5,
+            'injury': None,
+            'notes': '异常心率测试'
+        },
+        {
+            'date': '2026-06-17 12:00:00',
+            'sport_type': 'strength',
+            'distance_km': 0,
+            'duration_min': 500,
+            'avg_hr': 120,
+            'max_hr': 140,
+            'elevation_gain_m': 0,
+            'calories': 300,
+            'sleep_hours': 7,
+            'injury': None,
+            'notes': '异常时长测试'
+        }
+    ]
+
+    outlier_df = pd.DataFrame(outlier_data)
+    raw_df = pd.concat([raw_df, outlier_df], ignore_index=True)
+
+    cleaner = ActivityCleaner()
+    clean_df, issues_df = cleaner.clean_data(raw_df)
+    clean_df, outlier_issues = cleaner.detect_outliers_for_preview(clean_df)
+
+    print(f"✓ 总记录数: {len(clean_df)} 条")
+    outlier_count = clean_df['is_outlier'].sum()
+    print(f"✓ 检测到异常记录: {outlier_count} 条")
+    print(f"✓ 异常问题数: {len(outlier_issues)} 个")
+
+    for issue in outlier_issues:
+        print(f"  - {issue['date']} ({issue['sport_type']}): {issue['details']}")
+
+    clean_df_no_outliers = clean_df[~clean_df['is_outlier']].reset_index(drop=True)
+    print(f"\n✓ 排除异常后: {len(clean_df_no_outliers)} 条")
+
+    pace_analyzer = PaceAnalyzer()
+    _, pace_result = pace_analyzer.analyze(clean_df_no_outliers.drop(columns=['is_outlier']))
+    print(f"✓ 排除异常后训练负荷: {pace_result['summary'].get('total_training_load', 0):.0f}")
+
+    return clean_df, outlier_issues
+
+def test_column_mapping():
+    """测试CSV列名匹配功能"""
+    print("\n" + "=" * 60)
+    print("测试 8: CSV列名匹配功能")
+    print("=" * 60)
+
+    gen = SampleDataGenerator(seed=42)
+    raw_df = gen.generate(days=14)
+
+    custom_col_df = raw_df[[
+        'date', 'sport_type', 'distance_km', 'duration_min',
+        'avg_hr', 'max_hr', 'elevation_gain_m', 'calories',
+        'sleep_hours', 'injury', 'notes'
+    ]].copy()
+
+    custom_col_df.columns = [
+        '运动时间', '项目', '总距离(km)', '持续时间(分)',
+        '平均心率', '最大心率', '爬升(m)', '消耗卡路里',
+        '睡眠时长', '伤痛情况', '备注'
+    ]
+
+    print(f"✓ 原始列名: {list(custom_col_df.columns)}")
+
+    importer = DataImporter()
+    auto_mapping = importer.auto_detect_mapping(list(custom_col_df.columns))
+
+    print(f"✓ 自动匹配结果:")
+    for key, val in auto_mapping.items():
+        print(f"  {key} <-- {val}")
+
+    assert auto_mapping.get('date') == '运动时间', "日期列匹配失败"
+    assert auto_mapping.get('distance_km') == '总距离(km)', "距离列匹配失败"
+    assert auto_mapping.get('duration_min') == '持续时间(分)', "时长列匹配失败"
+
+    mapped_df = importer.apply_column_mapping(custom_col_df, auto_mapping)
+
+    print(f"\n✓ 映射后标准列: {list(mapped_df.columns)}")
+    assert 'date' in mapped_df.columns, "映射后缺少date列"
+    assert 'distance_km' in mapped_df.columns, "映射后缺少distance_km列"
+    print(f"✓ 映射后数据行数: {len(mapped_df)}")
+
+    cleaner = ActivityCleaner()
+    clean_df, _ = cleaner.clean_data(mapped_df)
+    print(f"✓ 清洗后数据行数: {len(clean_df)}")
+
+    return mapped_df, auto_mapping
+
+def test_monthly_trend():
+    """测试月度趋势分析功能"""
+    print("\n" + "=" * 60)
+    print("测试 9: 月度趋势分析（近8周训练负荷）")
+    print("=" * 60)
+
+    gen = SampleDataGenerator(seed=42)
+    raw_df = gen.generate(days=70)
+
+    cleaner = ActivityCleaner()
+    clean_df, _ = cleaner.clean_data(raw_df)
+
+    pace_analyzer = PaceAnalyzer()
+    clean_df, pace_result = pace_analyzer.analyze(clean_df)
+
+    hr_zones = HeartRateZones()
+    clean_df, hr_result = hr_zones.analyze(clean_df)
+
+    recovery = RecoveryReminder()
+    clean_df, recovery_result = recovery.analyze(clean_df)
+
+    goals = GoalTracker()
+    goal_result = goals.analyze(clean_df)
+
+    reporter = WeeklyReport()
+    report = reporter.generate(clean_df,
+                                recovery_analysis=recovery_result,
+                                goal_analysis=goal_result)
+
+    monthly_trend = report.get('monthly_trend', {})
+    print(f"✓ 趋势周数: {len(monthly_trend.get('weeks', []))} 周")
+    print(f"✓ 趋势判断: {monthly_trend.get('trend_direction', '')}")
+    print(f"✓ 趋势说明: {monthly_trend.get('trend_text', '')}")
+
+    weeks = monthly_trend.get('weeks', [])
+    if weeks:
+        print(f"\n✓ 各周训练负荷:")
+        for w in weeks:
+            print(f"  {w['week_label']}: 负荷={w.get('total_load', 0):.0f}, "
+                  f"时长={w.get('total_duration_min', 0):.0f}min, "
+                  f"睡眠={w.get('avg_sleep', 0):.1f}h"
+                  f"{' ⚠️伤痛' if w.get('has_injury') else ''}")
+
+    summary_export = report.get('summary_export', pd.DataFrame())
+    print(f"\n✓ 周报汇总导出: {len(summary_export)} 行, {len(summary_export.columns)} 列")
+    if not summary_export.empty:
+        print(f"  列名: {list(summary_export.columns)}")
+
+    md = report.get('markdown_report', '')
+    assert '月度趋势' in md, "Markdown报告中缺少月度趋势部分"
+    assert '近8周' in md, "Markdown报告中缺少近8周表格"
+    print(f"✓ Markdown包含月度趋势部分")
+
+    return monthly_trend, report
+
 def main():
     print("=" * 60)
     print("健康管理工具 - 增强版功能验证")
@@ -363,6 +540,33 @@ def main():
         results.append(("导出功能", True))
     except Exception as e:
         results.append(("导出功能", False))
+        print(f"✗ 失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        test_outlier_detection()
+        results.append(("异常值检测", True))
+    except Exception as e:
+        results.append(("异常值检测", False))
+        print(f"✗ 失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        test_column_mapping()
+        results.append(("CSV列名匹配", True))
+    except Exception as e:
+        results.append(("CSV列名匹配", False))
+        print(f"✗ 失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        test_monthly_trend()
+        results.append(("月度趋势分析", True))
+    except Exception as e:
+        results.append(("月度趋势分析", False))
         print(f"✗ 失败: {e}")
         import traceback
         traceback.print_exc()
